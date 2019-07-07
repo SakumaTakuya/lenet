@@ -7,6 +7,7 @@
 
 #include "header.h"
 
+#define NUMBER_OF_IMAGE 1000
 #define IMAGE_FILE       "./txt/image1000/"
 #define CHECK_PARAMS    (0)
 
@@ -42,11 +43,6 @@
         }                                                                   \
     } while (0)
 
-<<<<<<< HEAD
-int main()
-=======
-
-
 void run_all()
 {
     char imageFileName[64];
@@ -70,7 +66,11 @@ void run_all()
     float* hDens1B;
     float* hDens1O;
 
-    float* hDens2W;
+    float* hDens1W
+    float* hDens1B;
+    float* hDens1O;
+
+    float* hDens2W
     float* hDens2B;
     float* hDens2O;
     
@@ -88,11 +88,11 @@ void run_all()
 
     float* dPool2O;
 
-    float* dDens1W;
+    float* dDens1W
     float* dDens1B;
     float* dDens1O;
 
-    float* dDens2W;
+    float* dDens2W
     float* dDens2B;
     float* dDens2O;
 
@@ -293,7 +293,6 @@ void run_all()
             hPool1O, 12, 20, hConv2O, 8, 50, hConv2W, hConv2B, 5, 1);
         maxpooling(
             hConv2O, 8, 50, hPool2O, 4, 2, 2);
-
         classifier(
             hPool2O, 800, hDens1O, 500, hDens1W, hDens1B);
         relu(
@@ -437,7 +436,6 @@ void run_all()
 
 
 void run_only_cpu()
->>>>>>> efa4b83... fix compile error
 {
     int imageCount = 0;
     char imageFileName[64];
@@ -584,3 +582,9 @@ void run_only_cpu()
 //    return EXIT_SUCCESS;
 }
 
+int main()
+{
+    run_all();
+
+    return EXIT_SUCCESS;
+}
