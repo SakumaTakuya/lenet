@@ -322,10 +322,10 @@ void run_all()
         maxpool<4, 8><<<gPool2Dim, bPool2Dim>>>(
             dConv2O, dPool2O);
 
-        dense_relu<<<gDens1Dim, bDens1Dim>>>(
+        dense_relu<800><<<gDens1Dim, bDens1Dim>>>(
             dPool2O, dDens1O, dDens1W, dDens1B);
 
-        dense_softmax<<<gDens2Dim, bDens2Dim>>>(
+        dense_softmax<500><<<gDens2Dim, bDens2Dim>>>(
             dDens1O, dDens2O, dDens2W, dDens2B);
 
         CUDA_SAFE_CALL(

@@ -52,14 +52,17 @@ __global__ void conv2D(float* inImg, float* outImg,
 template<int OutSize, int OutSize2> 
 __global__ void maxpool(float* inImg, float* outImg);
 
+template<int InSize>
 __global__ void dense(float* input, float* output, float* weight, float* bias);
 
 __global__ void relu(float* input, float* output);
 
+template<int InSize>
 __global__ void dense_relu(float* input, float* output, float* weight, float* bias);
 
 __global__ void softmax(float* input, float* output);
 
+template<int InSize>
 __global__ void dense_softmax(float* input, float* output, float* weight, float* bias);
 #endif /* HEADER_H */
 
