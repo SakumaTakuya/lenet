@@ -66,11 +66,7 @@ void run_all()
     float* hDens1B;
     float* hDens1O;
 
-    float* hDens1W
-    float* hDens1B;
-    float* hDens1O;
-
-    float* hDens2W
+    float* hDens2W;
     float* hDens2B;
     float* hDens2O;
     
@@ -88,11 +84,11 @@ void run_all()
 
     float* dPool2O;
 
-    float* dDens1W
+    float* dDens1W;
     float* dDens1B;
     float* dDens1O;
 
-    float* dDens2W
+    float* dDens2W;
     float* dDens2B;
     float* dDens2O;
 
@@ -293,6 +289,7 @@ void run_all()
             hPool1O, 12, 20, hConv2O, 8, 50, hConv2W, hConv2B, 5, 1);
         maxpooling(
             hConv2O, 8, 50, hPool2O, 4, 2, 2);
+
         classifier(
             hPool2O, 800, hDens1O, 500, hDens1W, hDens1B);
         relu(
