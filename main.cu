@@ -47,7 +47,6 @@
 
 void run_all()
 {
-    int imageCount = 0;
     char imageFileName[64];
     char s[32];
 
@@ -65,11 +64,11 @@ void run_all()
 
     float* hPool2O;
 
-    float* hDens1W
+    float* hDens1W;
     float* hDens1B;
     float* hDens1O;
 
-    float* hDens2W
+    float* hDens2W;
     float* hDens2B;
     float* hDens2O;
     
@@ -87,11 +86,11 @@ void run_all()
 
     float* dPool2O;
 
-    float* dDens1W
+    float* dDens1W;
     float* dDens1B;
     float* dDens1O;
 
-    float* dDens2W
+    float* dDens2W;
     float* dDens2B;
     float* dDens2O;
 
@@ -123,9 +122,9 @@ void run_all()
 
     cudaEvent_t startEvent;
     cudaEvent_t stopEvent;
-    double elapsedTime;
-    double hTime = 0.0;
-    double bTime = 0.0;
+    float elapsedTime;
+    float hTime = 0.0;
+    float dTime = 0.0;
 
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
@@ -270,11 +269,11 @@ void run_all()
         printf("file: %s\n", imageFileName);
         fflush(stdout);
 
-        read_params(imageFileName, himage, IMAGE_SIZE);
-        norm_image(himage, IMAGE_SIZE);
+        read_params(imageFileName, hImage, IMAGE_SIZE);
+        norm_image(hImage, IMAGE_SIZE);
         
         /* Show image */
-        show_image(image, 28);
+        show_image(hImage, 28);
 
         printf("\n");
         
@@ -285,13 +284,14 @@ void run_all()
         cudaEventRecord(startEvent, 0);
 
         convolution(
-            hImage, 28, 1, hConv1O 24, 20, hConv1W, hConv1B, 5, 1);
+            hImage, 28, 1, hConv1O, 24, 20, hConv1W, hConv1B, 5, 1);
         maxpooling(
             hConv1O, 24, 20, hPool1O, 12, 2, 2);
         convolution(
             hPool1O, 12, 20, hConv2O, 8, 50, hConv2W, hConv2B, 5, 1);
         maxpooling(
             hConv2O, 8, 50, hPool2O, 4, 2, 2);
+
         classifier(
             hPool2O, 800, hDens1O, 500, hDens1W, hDens1B);
         relu(
@@ -316,12 +316,12 @@ void run_all()
 
         conv2D<28, 1, 56, 24, 48, 5, 10><<<gConv1Dim, bConv1Dim>>>(
             dImage, dConv1O, dConv1W, dConv1B);
-        maxpooling<12, 24><<<gPool1Dim, bPool1Dim>>>(
+        maxpool<12, 24><<<gPool1Dim, bPool1Dim>>>(
             dConv1O, dPool1O);
          
         conv2D<12, 1, 24,  8, 16, 5, 10><<<gConv1Dim, bConv1Dim>>>(
             dPool1O, dConv2O, dConv2W, dConv2B);
-        maxpooling<4, 8><<<gPool2Dim, bPool2Dim>>>(
+        maxpool<4, 8><<<gPool2Dim, bPool2Dim>>>(
             dConv2O, dPool2O);
 
         dense_relu<<<gDens1Dim, bDens1Dim>>>(
@@ -344,7 +344,7 @@ void run_all()
 
         /* Print result */
         printf("CPU \n");
-        print_all_params(fc2_out, 10);
+        print_all_params(hDens2O, 10);
         printf("\n");
 
         printf("GPU \n");
@@ -389,7 +389,7 @@ void run_all()
     free(hDens2B);
     free(hDens2O);
 
-    free(hOutput); 
+    free(dOutput); 
     
     /* Free device memory */
 
@@ -427,6 +427,10 @@ void run_all()
         cudaFree(dDens2B));
     CUDA_SAFE_CALL(
         cudaFree(dDens2O));
+
+    /* Reset device */
+    CUDA_SAFE_CALL(cudaDeviceReset());
+
 }
 
 
@@ -574,7 +578,7 @@ void run_only_cpu()
         break;
     }
 
-    return EXIT_SUCCESS;
+//    return EXIT_SUCCESS;
 }
 
 int main()

@@ -43,5 +43,23 @@ __host__ void show_result(const char* path, float* softmax, int size);
 __host__ void norm_image(float* image, int size); 
 __host__ void show_image(float* normed_image, int size);
 
+template <int InSize, int InChannels, int InSize2, 
+          int OutSize, int OutSize2,
+          int KernelSize, int KernelSize2>
+__global__ void conv2D(float* inImg, float* outImg, 
+                       float* weight, float* bias);
+
+template<int OutSize, int OutSize2> 
+__global__ void maxpool(float* inImg, float* outImg);
+
+__global__ void dense(float* input, float* output, float* weight, float* bias);
+
+__global__ void relu(float* input, float* output);
+
+__global__ void dense_relu(float* input, float* output, float* weight, float* bias);
+
+__global__ void softmax(float* input, float* output);
+
+__global__ void dense_softmax(float* input, float* output, float* weight, float* bias);
 #endif /* HEADER_H */
 
