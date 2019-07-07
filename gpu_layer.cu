@@ -10,7 +10,7 @@ __global__ void conv2D(float* inImg, float* outImg,
         BlockDim.x == the number of output channels
         threadDim  == (inputSize.x, inputSize.y, 1)
     */
-    __shared__ float sharedImg[InSize2]
+    __shared__ float sharedImg[InSize2];
 
     const unsigned int tx = threadIdx.x; 
     const unsigned int ty = threadIdx.y; 
@@ -33,7 +33,7 @@ __global__ void conv2D(float* inImg, float* outImg,
             #pragma unroll 5
             for (unsigned int j = 0; j < 5; j++) {
                 unsigned int kernelPos = i + KernelSize * j + KernelSize2 * ch;
-                sum += sharedImg[tx-j + InSize * (ty-j)] * wight[kernelPos] + bias[kernekPos];
+                sum += sharedImg[tx-j + InSize * (ty-j)] * weight[kernelPos] + bias[kernelPos];
             }
         }
     }
@@ -43,7 +43,7 @@ __global__ void conv2D(float* inImg, float* outImg,
 
 
 template<int OutSize, int OutSize2> 
-__global__ void maxpooling(float* inImg, float* outImg)
+__global__ void maxpool(float* inImg, float* outImg)
 {
     const unsigned int tx = threadIdx.x;
     const unsigned int ty = threadIdx.y;
@@ -71,7 +71,7 @@ __global__ void dense(float* input, float* output, float* weight, float* bias)
 
     __shared__ float sharedOut[InSize];
 
-    sharedOut[tx] = input[tx] * wight[tx + bSize * bx]; 
+    sharedOut[tx] = input[tx] * weight[tx + bSize * bx]; 
     __syncthreads();
 
     for (unsigned int i = InSize / 2; i > 0; i >>=1){
@@ -113,6 +113,38 @@ __global__ void softmax(float* input, float* output)
     output[tx] = exp / sharedOut[0];
 }
 
+
+template <int InSize>
+__global__ void dense_relu(float* input, float* output, float* weight, float* bias)
+{
+    /*
+    gridDim == (output size, 1, 1)
+    blockDim == (input size, 1, 1)
+    */
+
+    const unsigned int tx = threadIdx.x;
+    const unsigned int bx = blockIdx.x;
+    const unsigned int bSize = gridDim.x;
+
+    __shared__ float sharedOut[InSize];
+
+    sharedOut[tx] = input[tx] * weight[tx + bSize * bx]; 
+    __syncthreads();
+
+    for (unsigned int i = InSize / 2; i > 0; i >>=1){
+        if (tx < i) {
+            sharedOut[tx] = sharedOut[tx + i];
+        }
+
+        __syncthreads();
+    }
+    
+    if (tx == 0){
+        output[bx] = fmaxf(sharedOut[0] + bias[bx], 0);
+    }
+}
+
+
 template <int OutChannels, int InSize2>
 __global__ void dense_softmax(float* input, float* output, float* weight, float* bias)
 {
@@ -125,7 +157,7 @@ __global__ void dense_softmax(float* input, float* output, float* weight, float*
     const unsigned int tSize = blockDim.x;
     const unsigned int tSizeh = tSize >> 1;
 
-    const unsigned int wightPos = OutChannels * tx;
+    const unsigned int weightPos = OutChannels * tx;
     const unsigned int channelPos = tx >= tSizeh;
 
     // 
@@ -150,13 +182,13 @@ __global__ void dense_softmax(float* input, float* output, float* weight, float*
         }
 
         if (tx == 0 || tx == tSizeh) {
-            sharedSum[ch + 2 * channelPos] = expf(sharedOut[tx] * bias[ch + channelPos]);
+            sharedSum[ch + 2 * channelPos] = expf(sharedOut[tx] + bias[ch + channelPos]);
         }
     }
     
     __syncthreads();
 
-    if (tx > OutChannel) return;
+    if (tx > OutChannels) return;
 
     const float exp = sharedSum[tx];
     for (unsigned int i = tSize / 2; i > 0; i >>=1){

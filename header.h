@@ -49,6 +49,7 @@ template <int InSize, int InChannels, int InSize2,
 __global__ void conv2D(float* inImg, float* outImg, 
                        float* weight, float* bias);
 
+/*
 template<int OutSize, int OutSize2> 
 __global__ void maxpool(float* inImg, float* outImg);
 
@@ -64,5 +65,21 @@ __global__ void softmax(float* input, float* output);
 
 template<int InSize>
 __global__ void dense_softmax(float* input, float* output, float* weight, float* bias);
+
+template __global__ void conv2D<28, 1, 56, 24, 48, 5, 10>(
+    float* inImg, float* outImg, 
+    float* weight, float* bias);
+template __global__ void maxpool<12, 24>(
+    float* inImg, float* outImg);
+template __global__ void conv2D<12, 1, 24, 8, 16, 5, 10>(
+    float* inImg, float* outImg, 
+    float* weight, float* bias);
+template __global__ void maxpool<4, 8>(
+    float* inImg, float* outImg);
+template __global__ void dense_relu<800>(
+    float* input, float* output, float* weight, float* bias);
+template __global__ void dense_softmax<500>(
+    float* input, float* output, float* weight, float* bias);
+*/
 #endif /* HEADER_H */
 
