@@ -57,6 +57,7 @@ __global__ void maxpooling(float* inImg, float* outImg)
     ); 
 }
 
+template <int InSize>
 __global__ void dense(float* input, float* output, float* weight, float* bias)
 {
     /*
@@ -66,15 +67,14 @@ __global__ void dense(float* input, float* output, float* weight, float* bias)
 
     const unsigned int tx = threadIdx.x;
     const unsigned int bx = blockIdx.x;
-    const unsigned int tSize = blockDim.x;
     const unsigned int bSize = gridDim.x;
 
-    __shared__ float sharedOut[tSize];
+    __shared__ float sharedOut[InSize];
 
     sharedOut[tx] = input[tx] * wight[tx + bSize * bx]; 
     __syncthreads();
 
-    for (unsigned int i = tSize / 2; i > 0; i >>=1){
+    for (unsigned int i = InSize / 2; i > 0; i >>=1){
         if (tx < i) {
             sharedOut[tx] = sharedOut[tx + i];
         }
@@ -93,16 +93,16 @@ __global__ void relu(float* input, float* output)
     output[id] = fmaxf(0, input[id]);
 }
 
-
+template <int InSize>
 __global__ void softmax(float* input, float* output)
 {
     const unsigned int tx = threadIdx.x;
     const float exp = expf(input[tx]);
 
-    __shared__ float sharedOut[blockDim.x];
+    __shared__ float sharedOut[InSize];
 
     sharedOut[tx] = exp;
-    for (unsigned int i = tSize / 2; i > 0; i >>=1){
+    for (unsigned int i = InSize / 2; i > 0; i >>=1){
         if (tx < i) {
             sharedOut[tx] += sharedOut[tx + i];
         }
@@ -113,7 +113,7 @@ __global__ void softmax(float* input, float* output)
     output[tx] = exp / sharedOut[0];
 }
 
-template <int OutChannels>
+template <int OutChannels, int InSize2>
 __global__ void dense_softmax(float* input, float* output, float* weight, float* bias)
 {
     /*
@@ -129,7 +129,7 @@ __global__ void dense_softmax(float* input, float* output, float* weight, float*
     const unsigned int channelPos = tx >= tSizeh;
 
     // 
-    __shared__ float sharedOut[tSize << 1];
+    __shared__ float sharedOut[InSize2];
     __shared__ float sharedSum[OutChannels];
 
     #pragma unroll
