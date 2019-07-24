@@ -1,4 +1,3 @@
-
 /* lenet.cu */
 
 #include <stdio.h>
@@ -42,25 +41,7 @@
             exit(err);                                                      \
         }                                                                   \
     } while (0)
-/*
-template __global__ void conv2D<28, 1, 56, 24, 48, 5, 10>(
-    float* inImg, float* outImg, 
-    float* weight, float* bias);
-template __global__ void maxpool<12, 24>(
-    float* inImg, float* outImg);
-template __global__ void conv2D<12, 1, 24, 8, 16, 5, 10>(
-    float* inImg, float* outImg, 
-    float* weight, float* bias);
-template __global__ void maxpool<4, 8>(
-    float* inImg, float* outImg);
-template __global__ void dense_relu<800>(
-    float* input, float* output, float* weight, float* bias);
-template __global__ void dense_softmax<500>(
-    float* input, float* output, float* weight, float* bias);
-*/
 
-// 各ブロックが出力の各チャネルを操作する
-// 各スレッドが出力の各ピクセルの値を決定する 
 template <int InSize, int InChannels, int InSize2, 
           int OutSize, int OutSize2,
           int KernelSize, int KernelSize2>
@@ -68,44 +49,72 @@ __global__ void conv2D(float* inImg, float* outImg,
                        float* weight, float* bias)
 {
     /*
-        BlockDim.x == the number of output channels
-        threadDim  == (inputSize.x, inputSize.y, 1)
+        gridDim  == (output channel size, 1, 1)
+        blockDim == (input size, input size, 1)
     */
     __shared__ float sharedImg[InSize2];
 
     const unsigned int tx = threadIdx.x; 
     const unsigned int ty = threadIdx.y; 
     const unsigned int pos = tx + InSize * ty; 
+    const bool outOfRange = tx > OutSize+1 || tx < 2 || ty > OutSize+1 || ty < 2;
 
     float sum = 0;
-
     #pragma unroll
     for (unsigned int ch = 0; ch < InChannels; ch++) {
         __syncthreads();
         sharedImg[pos] = inImg[pos + InSize2 * ch]; 
         __syncthreads();
 
-        if (tx > OutSize+1 || tx < 2 || ty > OutSize+1 || ty < 2) {
+        if (outOfRange) {
             continue;
         }
 
-        #pragma unroll 5
-        for (unsigned int i = 0; i < 5; i++) {
-            #pragma unroll 5
-            for (unsigned int j = 0; j < 5; j++) {
-                unsigned int kernelPos = i + KernelSize * j + KernelSize2 * ch;
-                sum += sharedImg[tx-j + InSize * (ty-j)] * weight[kernelPos] + bias[kernelPos];
+        unsigned int kchan = KernelSize2 * ch;
+/*        
+        #pragma unroll KernelSize2
+        for (unsigned int kernelPos = kchan; kernelPos < KernelSize2 + kchan; kernelPos++) {
+            sum += sharedImg[tx-j + InSize * (ty-j)] * weight[kernelPos] + bias[kernelPos];
+        }
+*/
+     /* 
+        #pragma unroll
+        for (unsigned int i = 0; i < KernelSize2; i+=KernelSize) {
+            #pragma unroll
+            for (unsigned int j = 0; j < KernelSize; j++) {
+                unsigned int kernelPos = i + j + kchan; 
+    //            printf("shared : %f", sharedImg[tx-j + InSize * (ty-j)]);
+                sum += sharedImg[tx-2+j + InSize * (ty-2)] * weight[kernelPos] + bias[kernelPos];
+            }
+        }
+
+*/
+        for (unsigned int i = 0; i < KernelSize; i++) {
+            for (unsigned int j = 0; j < KernelSize; j++) {
+                unsigned int kPos = i + KernelSize * i + kchan;
+
+                sum += sharedImg[tx-2+j + InSize * (ty-2+i)] * weight[kPos] + bias[kPos];
             }
         }
     }
 
-    outImg[(tx-2) + (ty-2) * OutSize + blockIdx.x] = sum;
+    if (outOfRange) {
+        return;
+    }
+
+    outImg[(tx-2) + (ty-2) * OutSize + blockIdx.x * OutSize2] = 0;
+
 }
 
 
+// TODO shared memoryを使用する
 template<int OutSize, int OutSize2> 
 __global__ void maxpool(float* inImg, float* outImg)
 {
+    /*
+        gridDim == (in/output channel size, 1, 1)
+        blockDim == (output size, output size, 1)
+    */
     const unsigned int tx = threadIdx.x;
     const unsigned int ty = threadIdx.y;
     const unsigned int tx2 = tx * 2;
@@ -118,52 +127,24 @@ __global__ void maxpool(float* inImg, float* outImg)
     ); 
 }
 
-template <int InSize>
-__global__ void dense(float* input, float* output, float* weight, float* bias)
+
+template <int InSize, int OutSize>
+__global__ void dense_exp(float* input, float* output, float* weight, float* bias)
 {
     /*
-    gridDim == (output size, 1, 1)
-    blockDim == (input size, 1, 1)
+        gridDim == (output size, 1, 1)
+        blockDim == (input size, 1, 1)
     */
 
     const unsigned int tx = threadIdx.x;
     const unsigned int bx = blockIdx.x;
-    const unsigned int bSize = gridDim.x;
 
     __shared__ float sharedOut[InSize];
 
-    sharedOut[tx] = input[tx] * weight[tx + bSize * bx]; 
+    sharedOut[tx] = input[tx] * weight[bx + OutSize * tx]; 
     __syncthreads();
 
-    for (unsigned int i = InSize / 2; i > 0; i >>=1){
-        if (tx < i) {
-            sharedOut[tx] = sharedOut[tx + i];
-        }
-
-        __syncthreads();
-    }
-    
-    if (tx == 0){
-        output[bx] = sharedOut[0] + bias[bx];
-    }
-}
-
-__global__ void relu(float* input, float* output)
-{
-    const unsigned int id = blockDim.x * blockIdx.x + threadIdx.x;
-    output[id] = fmaxf(0, input[id]);
-}
-
-template <int InSize>
-__global__ void softmax(float* input, float* output)
-{
-    const unsigned int tx = threadIdx.x;
-    const float exp = expf(input[tx]);
-
-    __shared__ float sharedOut[InSize];
-
-    sharedOut[tx] = exp;
-    for (unsigned int i = InSize / 2; i > 0; i >>=1){
+    for (unsigned int i = InSize >> 1; i > 0; i >>=1){
         if (tx < i) {
             sharedOut[tx] += sharedOut[tx + i];
         }
@@ -171,28 +152,29 @@ __global__ void softmax(float* input, float* output)
         __syncthreads();
     }
     
-    output[tx] = exp / sharedOut[0];
+    if (tx == 0){
+        output[bx] = expf(sharedOut[0] + bias[bx]);
+    }
 }
 
 
-template <int InSize>
+template <int InSize, int OutSize>
 __global__ void dense_relu(float* input, float* output, float* weight, float* bias)
 {
     /*
-    gridDim == (output size, 1, 1)
-    blockDim == (input size, 1, 1)
+        gridDim == (output size, 1, 1)
+        blockDim == (input size, 1, 1)
     */
 
     const unsigned int tx = threadIdx.x;
     const unsigned int bx = blockIdx.x;
-    const unsigned int bSize = gridDim.x;
 
     __shared__ float sharedOut[InSize];
 
-    sharedOut[tx] = input[tx] * weight[tx + bSize * bx]; 
+    sharedOut[tx] = input[tx] * weight[bx + OutSize * tx]; 
     __syncthreads();
 
-    for (unsigned int i = InSize / 2; i > 0; i >>=1){
+    for (unsigned int i = InSize >> 1; i > 0; i >>=1){
         if (tx < i) {
             sharedOut[tx] = sharedOut[tx + i];
         }
@@ -201,67 +183,8 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
     }
     
     if (tx == 0){
-        output[bx] = fmaxf(sharedOut[0] + bias[bx], 0);
+        output[bx] = fmaxf(0, sharedOut[0] + bias[bx]);
     }
-}
-
-
-template <int OutChannels, int InSize2>
-__global__ void dense_softmax(float* input, float* output, float* weight, float* bias)
-{
-    /*
-    gridDim == (1, 1, 1)
-    blockDim == (500, 1, 1)
-    */
-
-    const unsigned int tx = threadIdx.x;
-    const unsigned int tSize = blockDim.x;
-    const unsigned int tSizeh = tSize >> 1;
-
-    const unsigned int weightPos = OutChannels * tx;
-    const unsigned int channelPos = tx >= tSizeh;
-
-    // 
-    __shared__ float sharedOut[InSize2];
-    __shared__ float sharedSum[OutChannels];
-
-    #pragma unroll
-    for (unsigned int ch = 0; ch < OutChannels;  ch+=2) {
-        sharedOut[tx] = input[tx] * weight[weightPos + ch * tSize];
-        sharedOut[tx + tSize] = input[tx] * weight[weightPos + (ch+1) * tSize];
-
-        __syncthreads();
-
-        unsigned int sift = 0;
-        for (unsigned int i = tSize; i > 4; i >>= 1) {
-            sift += channelPos ? (i >> 1) : 0;
-            if (tx < i) {
-                sharedOut[tx + sift] += sharedOut[tx + (i >> 1) + sift];
-            }
-
-            __syncthreads();
-        }
-
-        if (tx == 0 || tx == tSizeh) {
-            sharedSum[ch + 2 * channelPos] = expf(sharedOut[tx] + bias[ch + channelPos]);
-        }
-    }
-    
-    __syncthreads();
-
-    if (tx > OutChannels) return;
-
-    const float exp = sharedSum[tx];
-    for (unsigned int i = tSize / 2; i > 0; i >>=1){
-        if (tx < i) {
-            sharedSum[tx] += sharedSum[tx + i];
-        }
-
-        __syncthreads();
-    }
-    
-    output[tx] = exp / sharedOut[0];
-
 }
 
 
@@ -270,27 +193,27 @@ void run_all()
     char imageFileName[64];
     char s[32];
 
-    float* hImage;
+    float* hImage = new float[IMAGE_SIZE];
 
-    float* hConv1W;
-    float* hConv1B;
-    float* hConv1O;
+    float* hConv1W = new float[CONV1_W_SIZE];
+    float* hConv1B = new float[CONV2_B_SIZE];
+    float* hConv1O = new float[CONV2_OUT_SIZE];
 
-    float* hPool1O;
+    float* hPool1O = new float[POOL1_OUT_SIZE];
 
-    float* hConv2W;
-    float* hConv2B;
-    float* hConv2O;
+    float* hConv2W = new float[CONV2_W_SIZE];
+    float* hConv2B = new float[CONV2_B_SIZE];
+    float* hConv2O = new float[CONV2_OUT_SIZE];
 
-    float* hPool2O;
+    float* hPool2O = new float[POOL2_OUT_SIZE];
 
-    float* hDens1W;
-    float* hDens1B;
-    float* hDens1O;
+    float* hDens1W = new float[FC1_W_SIZE];
+    float* hDens1B = new float[FC1_B_SIZE];
+    float* hDens1O = new float[FC1_OUT_SIZE];
 
-    float* hDens2W;
-    float* hDens2B;
-    float* hDens2O;
+    float* hDens2W = new float[FC2_W_SIZE];
+    float* hDens2B = new float[FC2_B_SIZE];
+    float* hDens2O = new float[FC2_OUT_SIZE];
     
     float* dImage;
 
@@ -314,31 +237,30 @@ void run_all()
     float* dDens2B;
     float* dDens2O;
 
-    float* dOutput;
+    float* dActi1O;
 
-    dim3 bConv1Dim(20,  1, 1); 
-    dim3 gConv1Dim(28, 28, 1);
+    float* dOutput = new float[FC2_OUT_SIZE];
+
+    dim3 bConv1Dim(28, 28, 1); 
+    dim3 gConv1Dim(20,  1, 1);
     
     dim3 bPool1Dim(12, 12, 1);
-    dim3 gPool1Dim( 1,  1, 1);
+    dim3 gPool1Dim(20,  1, 1);
 
-    dim3 bConv2Dim( 8,  1, 1); 
-    dim3 gConv2Dim(12, 12, 1);
+    dim3 bConv2Dim(12, 12, 1); 
+    dim3 gConv2Dim(50,  1, 1);
 
-    dim3 bPool2Dim(  4, 4, 1);
-    dim3 gPool2Dim(  1, 1, 1);
+    dim3 bPool2Dim( 4, 4, 1);
+    dim3 gPool2Dim(50, 1, 1);
 
     dim3 bDens1Dim(800, 1, 1); 
     dim3 gDens1Dim(500, 1, 1);
 
-    dim3 bActi1Dim(500, 1, 1);
-    dim3 gActi1Dim(  1, 1, 1);
-
     dim3 bDens2Dim(500, 1, 1); 
     dim3 gDens2Dim( 10, 1, 1);
 
-    dim3 bActi2Dim( 10, 1, 1);
-    dim3 gActi2Dim(  1, 1, 1);
+    dim3 bActi1Dim( 10, 1, 1);
+    dim3 gActi1Dim(  1, 1, 1);
 
     cudaEvent_t startEvent;
     cudaEvent_t stopEvent;
@@ -352,35 +274,6 @@ void run_all()
     printf("/// LeNet ///\n");
     fflush(stdout);
 
-    printf("Allocating host memory ...\n");
-    fflush(stdout);
-
-    hImage = (float*)malloc(sizeof(float) * IMAGE_SIZE);
-
-    hConv1W = (float*)malloc(sizeof(float) * CONV1_W_SIZE);
-    hConv1B = (float*)malloc(sizeof(float) * CONV1_B_SIZE);
-    hConv1O = (float*)malloc(sizeof(float) * CONV1_OUT_SIZE);
-
-    hPool1O = (float*)malloc(sizeof(float) * POOL1_OUT_SIZE);
-    
-    hConv2W = (float*)malloc(sizeof(float) * CONV2_W_SIZE);
-    hConv2B = (float*)malloc(sizeof(float) * CONV2_B_SIZE);
-    hConv2O = (float*)malloc(sizeof(float) * CONV2_OUT_SIZE);
-
-    hPool2O = (float*)malloc(sizeof(float) * POOL2_OUT_SIZE);
-
-    hDens1W = (float*)malloc(sizeof(float) * FC1_W_SIZE);
-    hDens1B = (float*)malloc(sizeof(float) * FC1_B_SIZE);
-    hDens1O = (float*)malloc(sizeof(float) * FC1_OUT_SIZE);
-
-    hDens2W = (float*)malloc(sizeof(float) * FC2_W_SIZE);
-    hDens2B = (float*)malloc(sizeof(float) * FC2_B_SIZE);
-    hDens2O = (float*)malloc(sizeof(float) * FC2_OUT_SIZE);
-
-    dOutput = (float*)malloc(sizeof(float) * FC2_OUT_SIZE);
-    
-    printf("Reading parameters ...\n");
-    
     /* Read Conv1 layer parameters */
     read_params("./txt/conv1_w.txt", hConv1W, CONV1_W_SIZE);
     print_params("CONV1_W", hConv1W, CONV1_W_SIZE);
@@ -444,6 +337,9 @@ void run_all()
     CUDA_SAFE_CALL(
         cudaMalloc((void**)&dDens2O, FC2_OUT_SIZE * sizeof(float)));
 
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dActi1O, FC2_OUT_SIZE * sizeof(float)));
+
     printf("Transferring data from host to device ...");
 
     CUDA_SAFE_CALL(
@@ -451,12 +347,12 @@ void run_all()
                     CONV1_W_SIZE * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
-        cudaMemcpy(dConv1B, dConv1B,
+        cudaMemcpy(dConv1B, hConv1B,
                     CONV1_B_SIZE * sizeof(float),
                     cudaMemcpyHostToDevice));
 
     CUDA_SAFE_CALL(
-        cudaMemcpy(dConv2W, dConv1W,
+        cudaMemcpy(dConv2W, hConv2W,
                     CONV2_W_SIZE * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
@@ -469,12 +365,12 @@ void run_all()
                     FC1_W_SIZE * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
-        cudaMemcpy(dDens1B, hDens2B,
+        cudaMemcpy(dDens1B, hDens1B,
                     FC1_B_SIZE * sizeof(float),
                     cudaMemcpyHostToDevice));
 
     CUDA_SAFE_CALL(
-        cudaMemcpy(dDens2W, hDens1B,
+        cudaMemcpy(dDens2W, hDens2W,
                     FC2_W_SIZE * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
@@ -527,34 +423,34 @@ void run_all()
 
         hTime += elapsedTime; 
         
-        /* Feed-forward in CPU */
+        /* Feed-forward in GPU */
         CUDA_SAFE_CALL(
             cudaMemcpy(dImage, hImage, IMAGE_SIZE * sizeof(float),
                         cudaMemcpyHostToDevice));
 
         cudaEventRecord(startEvent, 0);
 
-        conv2D<28, 1, 56, 24, 48, 5, 10><<<gConv1Dim, bConv1Dim>>>(
+        conv2D<28,1,784,24,576,5,25><<<gConv1Dim, bConv1Dim>>>(
             dImage, dConv1O, dConv1W, dConv1B);
-        maxpool<12, 24><<<gPool1Dim, bPool1Dim>>>(
+#if 1 
+        maxpool<12,144><<<gPool1Dim, bPool1Dim>>>(
             dConv1O, dPool1O);
-         
-        conv2D<12, 1, 24,  8, 16, 5, 10><<<gConv1Dim, bConv1Dim>>>(
+        
+        conv2D<12,20,144,8,64,5,25><<<gConv2Dim, bConv2Dim>>>(
             dPool1O, dConv2O, dConv2W, dConv2B);
-        maxpool<4, 8><<<gPool2Dim, bPool2Dim>>>(
+        maxpool<4,16><<<gPool2Dim, bPool2Dim>>>(
             dConv2O, dPool2O);
 
-        dense_relu<800><<<gDens1Dim, bDens1Dim>>>(
+        dense_relu<800, 500><<<gDens1Dim, bDens1Dim>>>(
             dPool2O, dDens1O, dDens1W, dDens1B);
 
-        dense_softmax<10, 1000><<<gDens2Dim, bDens2Dim>>>(
+        dense_exp<500, 10><<<gDens2Dim, bDens2Dim>>>(
             dDens1O, dDens2O, dDens2W, dDens2B);
-
+#endif
         CUDA_SAFE_CALL(
             cudaMemcpy(dOutput, dDens2O, 
                         FC2_OUT_SIZE * sizeof(float),
                         cudaMemcpyDeviceToHost));
-
 
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
@@ -574,8 +470,6 @@ void run_all()
         printf("CPU: time: %f ms\n", hTime);
         printf("GPU: time: %f ms\n", dTime);
 
-        ++imageCount;
-
         printf("Write next image? (y or n): ");
         scanf("%s", s);
         printf("\n");
@@ -589,27 +483,27 @@ void run_all()
 
     /* Free memory*/
     
-    free(hImage);
+    delete[] hImage;
 
-    free(hConv1W);
-    free(hConv1B);
-    free(hConv1O);
-    free(hPool1O);
+    delete[] hConv1W;
+    delete[] hConv1B;
+    delete[] hConv1O;
+    delete[] hPool1O;
 
-    free(hConv2W);
-    free(hConv2B);
-    free(hConv2O);
-    free(hPool2O);
+    delete[] hConv2W;
+    delete[] hConv2B;
+    delete[] hConv2O;
+    delete[] hPool2O;
 
-    free(hDens1W);
-    free(hDens1B);
-    free(hDens1O);
+    delete[] hDens1W;
+    delete[] hDens1B;
+    delete[] hDens1O;
 
-    free(hDens2W);
-    free(hDens2B);
-    free(hDens2O);
+    delete[] hDens2W;
+    delete[] hDens2B;
+    delete[] hDens2O;
 
-    free(dOutput); 
+    delete[] dOutput; 
     
     /* Free device memory */
 
