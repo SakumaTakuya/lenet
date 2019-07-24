@@ -57,13 +57,15 @@ __global__ void conv2D(float* inImg, float* outImg,
     const unsigned int tx = threadIdx.x; 
     const unsigned int ty = threadIdx.y; 
     const unsigned int pos = tx + InSize * ty; 
-    const bool outOfRange = tx > OutSize+1 || tx < 2 || ty > OutSize+1 || ty < 2;
+    const int diff = (InSize - OutSize) >> 1;
+    const bool outOfRange = tx > OutSize || tx < diff || ty > OutSize || ty < diff;
 
     float sum = 0;
     #pragma unroll
     for (unsigned int ch = 0; ch < InChannels; ch++) {
         __syncthreads();
         sharedImg[pos] = inImg[pos + InSize2 * ch]; 
+        // printf("share[%d]: %f\n", pos, sharedImg[pos]);
         __syncthreads();
 
         if (outOfRange) {
@@ -71,29 +73,14 @@ __global__ void conv2D(float* inImg, float* outImg,
         }
 
         unsigned int kchan = KernelSize2 * ch;
-/*        
-        #pragma unroll KernelSize2
-        for (unsigned int kernelPos = kchan; kernelPos < KernelSize2 + kchan; kernelPos++) {
-            sum += sharedImg[tx-j + InSize * (ty-j)] * weight[kernelPos] + bias[kernelPos];
-        }
-*/
-     /* 
+
         #pragma unroll
-        for (unsigned int i = 0; i < KernelSize2; i+=KernelSize) {
+        for (unsigned int i = 0; i < KernelSize; i++) {
             #pragma unroll
             for (unsigned int j = 0; j < KernelSize; j++) {
-                unsigned int kernelPos = i + j + kchan; 
-    //            printf("shared : %f", sharedImg[tx-j + InSize * (ty-j)]);
-                sum += sharedImg[tx-2+j + InSize * (ty-2)] * weight[kernelPos] + bias[kernelPos];
-            }
-        }
-
-*/
-        for (unsigned int i = 0; i < KernelSize; i++) {
-            for (unsigned int j = 0; j < KernelSize; j++) {
-                unsigned int kPos = i + KernelSize * i + kchan;
-
-                sum += sharedImg[tx-2+j + InSize * (ty-2+i)] * weight[kPos] + bias[kPos];
+                unsigned int kPos = j + KernelSize * i + kchan;
+                printf("(%d, %d) \t w[%d] = %f\ti[%d] = %f\n", tx, ty, kPos, weight[kPos], tx-diff+j + InSize * (ty-diff+i), sharedImg[tx-diff+j + InSize * (ty-diff+i)]);
+                sum += sharedImg[tx-diff+j + InSize * (ty-diff+i)] * weight[kPos] + bias[kPos];
             }
         }
     }
@@ -102,7 +89,7 @@ __global__ void conv2D(float* inImg, float* outImg,
         return;
     }
 
-    outImg[(tx-2) + (ty-2) * OutSize + blockIdx.x * OutSize2] = 0;
+    outImg[(tx-diff) + (ty-diff) * OutSize + blockIdx.x * OutSize2] = sum;
 
 }
 
@@ -187,6 +174,76 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
     }
 }
 
+void test_conv()
+{
+    float himage[] = {1,1,1,1,
+                     1,2,1,1,
+                     1,1,1,1,
+                     1,1,1,1};
+
+    float hweight[] = {0,0,0,
+                      0,2,0,
+                      0,0,0};
+
+    float hbias[] = {0,0,0,
+                    0,0,0,
+                    0,0,0};
+    float hout[4] = {0};
+    float hmax[1] = {0};
+
+    float* dimage;
+    float* dweight;
+    float* dbias;
+    float* dout;
+    float* dmax;
+
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dimage, 16 * sizeof(float)));
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dweight, 9 * sizeof(float)));
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dbias, 9 * sizeof(float)));
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dout, 4 * sizeof(float)));
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dmax, 1 * sizeof(float)));
+
+    dim3 cgrid(1,1,1);
+    dim3 cblock(4,4,1);
+    
+    dim3 pgrid(1,1,1);
+    dim3 pblock(1,1,1);
+
+    CUDA_SAFE_CALL(
+        cudaMemcpy(dimage, himage,
+                    16 * sizeof(float),
+                    cudaMemcpyHostToDevice));
+    CUDA_SAFE_CALL(
+        cudaMemcpy(dweight, hweight,
+                    9 * sizeof(float),
+                    cudaMemcpyHostToDevice));
+    CUDA_SAFE_CALL(
+        cudaMemcpy(dbias, hbias,
+                    9 * sizeof(float),
+                    cudaMemcpyHostToDevice));
+
+    conv2D<4,1,16,2,4,3,9><<<cgrid, cblock>>>(
+        dimage, dout, dweight, dbias);
+    maxpool<1,1><<<pgrid, pblock>>>(
+        dout, dmax); 
+
+    CUDA_SAFE_CALL(
+        cudaMemcpy(hout, dout, 
+                    4 * sizeof(float),
+                    cudaMemcpyDeviceToHost));
+    CUDA_SAFE_CALL(
+        cudaMemcpy(hmax, dmax, 
+                    1 * sizeof(float),
+                    cudaMemcpyDeviceToHost));
+
+    printf("res: \n%f %f\n%f %f\n", hout[0], hout[1], hout[2], hout[3]);
+    printf("max: %f\n", *hmax);
+}
 
 void run_all()
 {
@@ -451,11 +508,20 @@ void run_all()
             cudaMemcpy(dOutput, dDens2O, 
                         FC2_OUT_SIZE * sizeof(float),
                         cudaMemcpyDeviceToHost));
+/*
+        float sum = 0;
+        for(int m = 0; m < FC2_OUT_SIZE; m++) {
+            sum += dOutput[m];
+        }
 
+        for(int m = 0; m < FC2_OUT_SIZE; m++) {
+            dOutput[m] /= sum;
+        }
+*/
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
         cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
-
+        
         dTime += elapsedTime; 
 
         /* Print result */
@@ -697,7 +763,8 @@ void run_only_cpu()
 
 int main()
 {
-    run_all();
+//    run_all();
+    test_conv();
 
     return EXIT_SUCCESS;
 }
