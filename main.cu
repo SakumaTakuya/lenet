@@ -79,7 +79,7 @@ __global__ void conv2D(float* inImg, float* outImg,
             #pragma unroll
             for (unsigned int j = 0; j < KernelSize; j++) {
                 unsigned int kPos = j + KernelSize * i + kchan;
-                printf("(%d, %d) \t w[%d] = %f\ti[%d] = %f\n", tx, ty, kPos, weight[kPos], tx-diff+j + InSize * (ty-diff+i), sharedImg[tx-diff+j + InSize * (ty-diff+i)]);
+//                printf("(%d, %d) \t w[%d] = %f\ti[%d] = %f\n", tx, ty, kPos, weight[kPos], tx-diff+j + InSize * (ty-diff+i), sharedImg[tx-diff+j + InSize * (ty-diff+i)]);
                 sum += sharedImg[tx-diff+j + InSize * (ty-diff+i)] * weight[kPos] + bias[kPos];
             }
         }
@@ -159,11 +159,13 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
     __shared__ float sharedOut[InSize];
 
     sharedOut[tx] = input[tx] * weight[bx + OutSize * tx]; 
+//    printf("share[%d]:%f\n",tx, sharedOut[tx]);
     __syncthreads();
 
     for (unsigned int i = InSize >> 1; i > 0; i >>=1){
+//        if (tx == 0) printf("i: %d\n", i);
         if (tx < i) {
-            sharedOut[tx] = sharedOut[tx + i];
+            sharedOut[tx] += sharedOut[tx + i];
         }
 
         __syncthreads();
@@ -241,8 +243,63 @@ void test_conv()
                     1 * sizeof(float),
                     cudaMemcpyDeviceToHost));
 
+    printf("ans: \n%f %f\n%f %f\n",4.0, 2.0, 2.0, 2.0); 
     printf("res: \n%f %f\n%f %f\n", hout[0], hout[1], hout[2], hout[3]);
     printf("max: %f\n", *hmax);
+}
+
+void test_dense()
+{
+    float himage[] = {1,2,1,1};
+    float hweight[] = {1,1,2,2,1,1,1,1};
+    float hbias[] = {1, 0};
+
+    float hout[2] = {0};
+
+    float* dimage;
+    float* dweight;
+    float* dbias;
+
+    float* dout;
+
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dimage, 4 * sizeof(float)));
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dweight, 8 * sizeof(float)));
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dbias, 2 * sizeof(float)));
+    CUDA_SAFE_CALL(
+        cudaMalloc((void**)&dout, 2 * sizeof(float)));
+
+    dim3 dgrid(2,1,1);
+    dim3 dblock(4,1,1);
+    
+
+    CUDA_SAFE_CALL(
+        cudaMemcpy(dimage, himage,
+                    4 * sizeof(float),
+                    cudaMemcpyHostToDevice));
+    CUDA_SAFE_CALL(
+        cudaMemcpy(dweight, hweight,
+                    8 * sizeof(float),
+                    cudaMemcpyHostToDevice));
+    CUDA_SAFE_CALL(
+        cudaMemcpy(dbias, hbias,
+                    2 * sizeof(float),
+                    cudaMemcpyHostToDevice));
+
+    dense_relu<4,2><<<dgrid, dblock>>>(
+        dimage, dout, dweight, dbias);
+
+
+    CUDA_SAFE_CALL(
+        cudaMemcpy(hout, dout, 
+                    2 * sizeof(float),
+                    cudaMemcpyDeviceToHost));
+
+    printf("ans: %f %f \n", 8.0, 7.0);
+    printf("res: %f %f \n", hout[0], hout[1]);
+
 }
 
 void run_all()
@@ -761,10 +818,13 @@ void run_only_cpu()
 //    return EXIT_SUCCESS;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
-//    run_all();
-    test_conv();
+    switch(*argv[1]){
+        case 'c': test_conv(); break;
+        case 'd': test_dense(); break;
+        default: run_all(); break;
+    }
 
     return EXIT_SUCCESS;
 }
