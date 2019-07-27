@@ -204,12 +204,19 @@ __global__ void dense_exp(float* input, float* output, float* weight, float* bia
     sharedOut[tx] = input[tx] * weight[tx + InSize * bx]; 
     __syncthreads();
 
-    for (unsigned int i = InSize >> 1; i > 0; i >>=1){
+    unsigned int j = 0;
+    for (unsigned int i = InSize >> 1; i > 0;i >>= 1){
         if (tx < i) {
             sharedOut[tx] += sharedOut[tx + i];
+            if (j == 1 && tx == 0) {
+                sharedOut[tx] += sharedOut[i << 1];
+            }
         }
 
         __syncthreads();
+
+        
+        j = i & 1;
     }
     
     if (tx == 0){
@@ -231,6 +238,10 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
 
     __shared__ float sharedOut[InSize];
 
+#ifdef D
+    if (tx == 0) printf("input[%d]=%f\nweight[%d,%d]=%f\n", 
+        tx, input[tx], tx, bx, weight[tx + InSize * bx]);
+#endif 
     sharedOut[tx] = input[tx] * weight[tx + InSize * bx]; 
 #ifdef DO
     if ( tx == 0 && bx == 0)
@@ -238,15 +249,31 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
 #endif
     __syncthreads();
 
-    for (unsigned int i = InSize >> 1; i > 0; i >>=1){
+    unsigned int j = 0;
+    for (unsigned int i = InSize >> 1; i > 0; i >>= 1 ){
 #ifdef DO
         if (tx == 0 && bx == 0) printf("i: %d\n", i);
 #endif
         if (tx < i) {
+#ifdef D
+            printf("%dsum[%d]{%f} = shared[%d]{%f}+shared[%d]{%f}\n",
+                bx, tx, sharedOut[tx] + sharedOut[tx+i],
+                tx, sharedOut[tx], tx+i, sharedOut[tx+i]);
+#endif
             sharedOut[tx] += sharedOut[tx + i];
+
+            if (j == 1 && tx == 0) {
+#ifdef D
+                printf("%dsum[%d]{%f} = shared[%d]{%f}+shared[%d]{%f}\n",
+                    bx, tx, sharedOut[tx] + sharedOut[tx+i],
+                    tx, sharedOut[tx], tx+i, sharedOut[tx+i]);
+#endif
+                sharedOut[tx] += sharedOut[i << 1];
+            }
         }
 
         __syncthreads();
+       j = i & 1;
     }
     
     if (tx == 0){
@@ -335,9 +362,9 @@ void test_conv()
 
 void test_dense()
 {
-    float himage[] = {1,2,1,1};
-    float hweight[] = { 1,1,2,2,
-                        1,1,1,1};
+    float himage[] = {1,2,1,1,1,1};
+    float hweight[] = { 1,1,2,2,1,1,
+                        1,1,1,1,1,1};
     float hbias[] = {1, 0};
 
     float hout[2] = {0};
@@ -349,48 +376,48 @@ void test_dense()
     float* dout;
 
     CUDA_SAFE_CALL(
-        cudaMalloc((void**)&dimage, 4 * sizeof(float)));
+        cudaMalloc((void**)&dimage, 6 * sizeof(float)));
     CUDA_SAFE_CALL(
-        cudaMalloc((void**)&dweight, 8 * sizeof(float)));
+        cudaMalloc((void**)&dweight, 12 * sizeof(float)));
     CUDA_SAFE_CALL(
         cudaMalloc((void**)&dbias, 2 * sizeof(float)));
     CUDA_SAFE_CALL(
         cudaMalloc((void**)&dout, 2 * sizeof(float)));
 
     dim3 dgrid(2,1,1);
-    dim3 dblock(4,1,1);
+    dim3 dblock(6,1,1);
 
     CUDA_SAFE_CALL(
         cudaMemcpy(dimage, himage,
-                    4 * sizeof(float),
+                    6 * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
         cudaMemcpy(dweight, hweight,
-                    8 * sizeof(float),
+                    12 * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
         cudaMemcpy(dbias, hbias,
                     2 * sizeof(float),
                     cudaMemcpyHostToDevice));
 
-    dense_relu<4,2><<<dgrid, dblock>>>(
+    dense_relu<6,2><<<dgrid, dblock>>>(
         dimage, dout, dweight, dbias);
     CUDA_SAFE_CALL(
         cudaMemcpy(hout, dout, 
                     2 * sizeof(float),
                     cudaMemcpyDeviceToHost));
 
-    printf("ans: %f %f \n", 8.0, 7.0);
+    printf("ans: %f %f \n", 10.0,7.0 );
     printf("res: %f %f \n", hout[0], hout[1]);
 
-    dense_exp<4,2><<<dgrid, dblock>>>(
+    dense_exp<6,2><<<dgrid, dblock>>>(
         dimage, dout, dweight, dbias);
     CUDA_SAFE_CALL(
         cudaMemcpy(hout, dout, 
                     2 * sizeof(float),
                     cudaMemcpyDeviceToHost));
 
-    printf("ans: %f %f \n", expf(8.0), expf(7.0));
+    printf("ans: %f %f \n", expf(10.0), expf(7.0));
     printf("res: %f %f \n", hout[0], hout[1]);
 }
 
