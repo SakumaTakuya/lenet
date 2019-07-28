@@ -134,37 +134,45 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
     const unsigned int outx = tx-Diff;
     const unsigned int outy = ty-Diff;
     const unsigned int pos = tx + InSize * ty; 
+    const unsigned int kerChPos = KernelSize2 * InChannels * bx;
+    const unsigned int inSizOuty = InSize * outy;
     const bool outOfRange = tx>OutSize+1 || tx<Diff || ty>OutSize+1 || ty<Diff;
 
+    unsigned int imgCh = 0;
+    unsigned int kchan = kerChPos;
     float sum = 0;
     #pragma unroll
     for (unsigned int ch = 0; ch < InChannels; ch++) {
         __syncthreads();
-        sharedImg[pos] = inImg[pos + InSize2 * ch]; 
+        sharedImg[pos] = inImg[pos + imgCh]; 
         __syncthreads();
 
         if (outOfRange) {
             continue;
         }
 
-        unsigned int kchan = KernelSize2 * ch + KernelSize2 * InChannels * bx;
-
+        unsigned int kPos = kchan;
+        unsigned int imgyPos = inSizOuty;
         #pragma unroll
         for (unsigned int i = 0; i < KernelSize; i++) {
             #pragma unroll
             for (unsigned int j = 0; j < KernelSize; j++) {
-                unsigned int kPos = j + KernelSize * i + kchan;
-                sum += sharedImg[outx+j + InSize * (outy+i)] * weight[kPos];
+                sum += sharedImg[outx+j + imgyPos] * weight[kPos];
+                kPos++;
             }
+            imgyPos += InSize;
         }
+        imgCh += InSize2;
+        kchan += KernelSize2;
     }
 
     if (outOfRange) {
         return;
     }
-    
+     
+    const unsigned int outyPos = outy * OutSize;
 
-    sharedOut[outx + outy * OutSize] = sum + bias[bx];
+    sharedOut[outx + outyPos] = sum + bias[bx];
     __syncthreads();
 
     if (outx >= OutSizeHalf || outy >= OutSizeHalf) {
@@ -176,12 +184,12 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
     const int outx2Nex = outx2 + 1;
     const int outy2Nex = ((outy << 1) + 1) * OutSize;
 
-    outImg[outx + outy * OutSizeHalf + bx * OutSizeHalf2] = 
+    outImg[outx + (outyPos >> 1) + bx * OutSizeHalf2] = 
         fmaxf(
             fmaxf(sharedOut[outx2    + outy2], 
-                 sharedOut[outx2Nex + outy2]),
+                  sharedOut[outx2Nex + outy2]),
             fmaxf(sharedOut[outx2    + outy2Nex], 
-                 sharedOut[outx2Nex + outy2Nex])
+                  sharedOut[outx2Nex + outy2Nex])
         );
 }
 
