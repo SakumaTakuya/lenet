@@ -175,11 +175,12 @@ __host__ void convolution(float* input, int isize, int ichan,
     int kcol;
     int krow;
     int kch;
-
+#ifdef D
     printf("convolution(): isize: %d, ichan: %d, osize: %d, "
            "ochan: %d, ksize: %d, stride: %d\n",
            isize, ichan, osize, ochan, ksize, stride);
     fflush(stdout);
+#endif
 
     for (och = 0; och < ochan; ++och) {
         for (orow = 0; orow < osize; ++orow) {
@@ -221,11 +222,12 @@ __host__ void maxpooling(float* input, int isize, int ichan,
     int krow;
     float max;
     float tmp;
-
+#ifdef D
     printf("maxpooling(): isize: %d, ichan: %d, osize: %d, "
            "ksize: %d, stride: %d\n",
            isize, ichan, osize, ksize, stride);
     fflush(stdout);
+#endif
 
     for (och = 0; och < ichan; ++och) {
         for (orow = 0; orow < osize; ++orow) {
@@ -255,10 +257,10 @@ __host__ void relu(float* input, int isize, int ichan)
     int ocol;
     int orow;
     int och;
-
+#ifdef D
     printf("relu(): isize: %d, ichan: %d\n", isize, ichan);
     fflush(stdout);
-
+#endif
     for (och = 0; och < ichan; ++och)
         for (orow = 0; orow < isize; ++orow)
             for (ocol = 0; ocol < isize; ++ocol)
@@ -281,11 +283,11 @@ __host__ void lrn(float* input, int isize, int ichan,
 
     alpha = 0.0001f;
     beta = 0.75f;
-
+#ifdef D
     printf("lrn(): isize: %d, ichan: %d, k: %d, n: %d, a: %f, b: %f\n",
            isize, ichan, k, n, alpha, beta);
     fflush(stdout);
-
+#endif
     for (och = 0; och < ichan; ++och) {
         for (orow = 0; orow < isize; ++orow) {
             for (ocol = 0; ocol < isize; ++ocol) {
@@ -311,10 +313,10 @@ __host__ void classifier(float* input, int isize,
 {
     int i;
     int j;
-
+#ifdef D
     printf("classifier(): isize: %d, osize: %d\n", isize, osize);
     fflush(stdout);
-
+#endif
     for (i = 0; i < osize; ++i) {
         *(output + i) = 0.0f;
 
@@ -330,10 +332,10 @@ __host__ void softmax(float* input, int isize)
 {
     int i;
     float sum = 0.0f;
-
+#ifdef D
     printf("softmax(): isize: %d\n", isize);
     fflush(stdout);
-
+#endif
     for (i = 0; i < isize; ++i)
         sum += expf(*(input + i));
     

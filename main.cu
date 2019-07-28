@@ -557,18 +557,19 @@ void run_all()
     int imageCount;
     for(imageCount = 0; imageCount < 1000; imageCount++) {
         sprintf(imageFileName, "%simage%03d.txt", IMAGE_FILE,imageCount); 
+#ifdef D
         printf("file: %s\n", imageFileName);
         fflush(stdout);
-
+#endif
         read_params(imageFileName, hImage, IMAGE_SIZE);
         norm_image(hImage, IMAGE_SIZE);
-
+#ifdef D
         show_image(hImage, 28);
         printf("\n");
 
         printf("feed forward ... \n");
         fflush(stdout);
-
+#endif
         cudaEventRecord(startEvent, 0);
 
         /* Feed-Forward in CPU */
@@ -710,7 +711,7 @@ void run_all()
         dTime += elapsedTime;
 
 
-        
+#ifdef D
         printf("\n");
         printf("CPU: time: %f ms \n", hTime / (1+imageCount));
         printf("\n");
@@ -728,7 +729,20 @@ void run_all()
 
         if (s[0] == 'n')
             break;
+#endif
     }
+
+    printf("\n");
+    printf("CPU: time: %f ms \n", hTime / 1000);
+    printf("\n");
+    
+    print_all_params(hDense2O, 10);
+    printf("\n");
+
+    printf("GPU: time: %f ms \n", dTime / 1000);
+    print_all_params(gDense2O, 10);
+    printf("\n");
+
 
     /* Reset device */
     CUDA_SAFE_CALL(cudaDeviceReset());
