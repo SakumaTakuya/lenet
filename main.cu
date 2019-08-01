@@ -42,21 +42,29 @@
         }                                                                   \
     } while (0)
 
-void* deviceMalloc(size_t size) {
+void* deviceMalloc(size_t size) 
+{
     void* ret;
     CUDA_SAFE_CALL(
         cudaMalloc(&ret, size));
     return ret;
 }
 
-void* transFromHost(void* data, size_t size) {
+void* transFromHost(void* data, size_t size)
+{
     void* ret = deviceMalloc(size);
     CUDA_SAFE_CALL(
         cudaMemcpy(ret, data, size, cudaMemcpyHostToDevice));
     return ret;
 }
 
-void* transFromDevice(void* data, size_t size) {
+void deviceFree(void* data)
+{
+    CUDA_SAFE_CALL(cudaFree(data));
+}
+
+void* transFromDevice(void* data, size_t size) 
+{
     void* ret = malloc(size);
     CUDA_SAFE_CALL(
         cudaMemcpy(ret, data, size, cudaMemcpyDeviceToHost));
@@ -113,10 +121,19 @@ __global__ void conv2D(float* inImg, float* outImg,
     outImg[(tx-diff) + (ty-diff) * OutSize + bx * OutSize2] = sum + bias[bx];
 }
 
-
+/*
+    Depth == BlockDim.z
+    InSize2Depth == InSize2 << (Depth >> 1)
+    KernelSize2Depth == KernelSize2 << (Depth >> 1)
+    // 一つ一つのサイズはKernelSize * KernelSize * InChannels
+    KernelScale = KernelSize2 * InChannels
+    LoopCount == InChannels >> (Depth >> 1)
+*/
 template <int InSize,  int InChannels,  int InSize2, 
           int OutSize, int OutSize2, int OutSizeHalf, int OutSizeHalf2,
-          int KernelSize, int KernelSize2, int Diff, int Depth >
+          int KernelSize, int KernelSize2, int Diff, 
+          int Depth, int InSize2Depth, int KernelSize2Depth,
+          int KernelScale, int LoopCount>
 __global__ void conv2D_pool(float* inImg, float* outImg, 
                             float* weight, float* bias)
 {
@@ -125,8 +142,8 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
         blockDim == (input size, input size, Depth)
     */
 
-    __shared__ float sharedImg[InSize2][Depth + 1];
-    __shared__ float sharedOut[OutSize2][Depth + 1]; 
+    __shared__ float sharedImg[InSize2][Depth];
+    __shared__ float sharedOut[OutSize2][Depth]; 
 
     const unsigned int tx = threadIdx.x; 
     const unsigned int ty = threadIdx.y; 
@@ -139,20 +156,17 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
     const unsigned int outy = ty - Diff;
 
     const unsigned int pos = tx + InSize * ty; 
-    // 一つ一つのサイズはKernelSize * KernelSize * InChannels
-    const unsigned int kerChPos = KernelSize2 * InChannels * bx;
     const unsigned int inSizOuty = InSize * outy;
     const bool outOfRange = tx >= InSize - Diff ||
                             tx <  Diff          || 
                             ty >= InSize - Diff || 
                             ty <  Diff;
-    const unsigned int loopCount = InChannels >> Depth;
 
     unsigned int imgCh = imgTar;
-    unsigned int kchan = kerTar + kerChPos;
+    unsigned int kchan = kerTar + KernelScale * bx;
     float sum = 0;
     #pragma unroll
-    for (unsigned int ch = 0; ch < loopCount; ch++) {
+    for (unsigned int ch = 0; ch < LoopCount; ch++) {
         __syncthreads();
         sharedImg[pos][tz] = inImg[pos + imgCh]; 
         //printf("share[%d][%d]=%f\tinimg[%d]=%f\n", 
@@ -180,8 +194,8 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
             }
             imgyPos += InSize;
         }
-        imgCh += InSize2 << Depth;
-        kchan += KernelSize2 << Depth;
+        imgCh += InSize2Depth;
+        kchan += KernelSize2Depth;
     }
 
     if (outOfRange) {
@@ -200,7 +214,7 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
     }
 
     #pragma unroll
-    for (unsigned int i = 1; i <= Depth; i++){
+    for (unsigned int i = 1; i < Depth; i++){
         //printf("add(%d):%f+%f\n", 
         //    outPos, sharedOut[outPos][0], sharedOut[outPos][i]);
         sharedOut[outPos][0] += sharedOut[outPos][i]; 
@@ -408,8 +422,8 @@ void test_conv()
                     2 * sizeof(float),
                     cudaMemcpyHostToDevice));
 
-    conv2D_pool<4,2,16,2,4,1,1,3,9,1,1><<<cgrid, cblock>>>(
-        dimage, dmax, dweight, dbias);
+    conv2D_pool<4,2,16,2,4,1,1,3,9,1,2,32,18,18,1>
+        <<<cgrid, cblock>>>(dimage, dmax, dweight, dbias);
 
     CUDA_SAFE_CALL(
         cudaMemcpy(hout, dout, 
@@ -634,18 +648,12 @@ void run_all()
         cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
         hTime += elapsedTime;
 
+        cudaEventRecord(startEvent, 0);
+
         /* Feed-Forward in GPU */
         CUDA_SAFE_CALL(
             cudaMemcpy(dImage, hImage, IMAGE_SIZE * sizeof(float),
             cudaMemcpyHostToDevice));
-
-        CUDA_SAFE_CALL(
-            cudaMemcpy(hImage, dImage, IMAGE_SIZE * sizeof(float),
-            cudaMemcpyDeviceToHost));
-
-        show_image(hImage, 28);
-
-        cudaEventRecord(startEvent, 0);
 
 /*
         conv2D<28,1,784,24,576,5,25><<<conv1Grid, conv1Block>>>(
@@ -658,16 +666,16 @@ void run_all()
             dConv2O, dPool2O);
 */
 
-        conv2D_pool<28,1,784,24,576,12,144,5,25,2,0><<<conv1Grid,conv1Block>>>(
-            dImage, dPool1O, dConv1W, dConv1B);
-        conv2D_pool<12,20,144,8,64,4,16,5,25,2,1><<<conv2Grid, conv2Block>>>(
-            dPool1O, dPool2O, dConv2W, dConv2B);
-
+        conv2D_pool<28, 1,784,24,576,12,144,5,25,2,1,784, 25, 25,1>
+            <<<conv1Grid,conv1Block>>>(dImage, dPool1O, dConv1W, dConv1B);
+        conv2D_pool<12,20,144, 8, 64, 4, 16,5,25,2,4,288, 50,500,10>
+            <<<conv2Grid, conv2Block>>>(dPool1O, dPool2O, dConv2W, dConv2B);
 
         dense_relu<800,500><<<dense1Grid, dense1Block>>>(
             dPool2O, dDense1O, dDense1W, dDense1B);
         dense_exp<500,10><<<dense2Grid, dense2Block>>>(
             dDense1O, dDense2O, dDense2W, dDense2B);
+
 #ifdef D
         float* debC1W = (float*) transFromDevice(
             dConv1W, sizeof(float) * CONV1_W_SIZE);
@@ -780,16 +788,61 @@ void run_all()
     }
 
     printf("\n");
-    printf("CPU: time: %f ms \n", hTime / 1000);
+    printf("CPU: time: %f ms \n", hTime / (1+imageCount));
     printf("\n");
     
     print_all_params(hDense2O, 10);
     printf("\n");
 
-    printf("GPU: time: %f ms \n", dTime / 1000);
+    printf("GPU: time: %f ms \n", dTime / (1+imageCount));
     print_all_params(gDense2O, 10);
     printf("\n");
 
+    free(hImage);
+
+    free(hConv1W);
+    free(hConv1B);
+    free(hConv1O);
+
+    free(hPool1O);
+
+    free(hConv2W);
+    free(hConv2B);
+    free(hConv2O);
+
+    free(hPool2O);
+
+    free(hDense1W);
+    free(hDense1B);
+    free(hDense1O);
+
+    free(hDense2W);
+    free(hDense2B);
+    free(hDense2O);
+
+    free(gDense2O);
+
+    deviceFree(dImage); 
+
+    deviceFree(dConv1O); 
+    deviceFree(dConv1W); 
+    deviceFree(dConv1B); 
+
+    deviceFree(dPool1O);
+
+    deviceFree(dConv2O); 
+    deviceFree(dConv2W); 
+    deviceFree(dConv2B); 
+
+    deviceFree(dPool2O);
+
+    deviceFree(dDense1W);
+    deviceFree(dDense1B);
+    deviceFree(dDense1O);
+
+    deviceFree(dDense2W);
+    deviceFree(dDense2B);
+    deviceFree(dDense2O);
 
     /* Reset device */
     CUDA_SAFE_CALL(cudaDeviceReset());
