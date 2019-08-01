@@ -118,69 +118,56 @@ template <int InSize,  int InChannels,  int InSize2,
           int OutSize, int OutSize2, int OutSizeHalf, int OutSizeHalf2,
           int KernelSize, int KernelSize2, int Diff >
 __global__ void conv2D_pool(float* inImg, float* outImg, 
-                       float* weight, float* bias)
+                            float* weight, float* bias)
 {
     /*
         gridDim  == (output channel size, 1, 1)
-        blockDim == (input size, input size, 1)
+        blockDim == (input size, input size, input channel size)
     */
 
-    __shared__ float sharedImg[InSize2];
-    __shared__ float sharedOut[OutSize2]; 
-
+    __shared__ float sharedImg[InSize2 * InChannels];
+    __shared__ float sharedOut[OutSize2 * InChannels]; 
+    
     const unsigned int tx = threadIdx.x; 
     const unsigned int ty = threadIdx.y; 
+    const unsigned int tz = threadIdx.z; 
     const unsigned int bx = blockIdx.x;
     const unsigned int outx = tx-Diff;
     const unsigned int outy = ty-Diff;
-    const unsigned int pos = tx + InSize * ty; 
-    const unsigned int kerChPos = KernelSize2 * InChannels * bx;
-    const unsigned int inSizOuty = InSize * outy;
-    const bool outOfRange = tx>OutSize+1 || tx<Diff || ty>OutSize+1 || ty<Diff;
+    const unsigned int pos = tx + InSize * ty + InSize2 * tz; 
+    const bool outOfRange = tx > OutSize+1 || 
+                            tx < Diff      || 
+                            ty > OutSize+1 || 
+                            ty < Diff;
 
-    unsigned int imgCh = 0;
-    unsigned int kchan = kerChPos;
-    float sum = 0;
-    #pragma unroll
-    for (unsigned int ch = 0; ch < InChannels; ch++) {
-        __syncthreads();
-        sharedImg[pos] = inImg[pos + imgCh]; 
-        __syncthreads();
-
-        if (outOfRange) {
-            continue;
-        }
-
-        unsigned int kPos = kchan;
-        unsigned int imgyPos = inSizOuty;
-        #pragma unroll
-        for (unsigned int i = 0; i < KernelSize; i++) {
-            #pragma unroll
-            for (unsigned int j = 0; j < KernelSize; j++) {
-                sum += sharedImg[outx+j + imgyPos] * weight[kPos];
-                kPos++;
-            }
-            imgyPos += InSize;
-        }
-        imgCh += InSize2;
-        kchan += KernelSize2;
-    }
-
-    if (outOfRange) {
-        return;
-    }
-     
-    const unsigned int outyPos = outy * OutSize;
-
-    sharedOut[outx + outyPos] = sum + bias[bx];
+    sharedImg[pos] = inImg[pos];
     __syncthreads();
 
-    if (outx >= OutSizeHalf || outy >= OutSizeHalf) {
+    if (outOfRange) return;
+
+    float sum = 0;
+    #pragma unroll
+    for (unsigned int i = 0; i < KernelSize; i++) {
+        #pragma unroll
+        for (unsigned int j = 0; j < KernelSize; j++) {
+            sum += 
+                sharedImg[outx+j + InSize * (outy+i) * InSize2 * tz] * 
+                weight[j + KernelSize * i + KernelSize2 * tz];
+        }
+    }
+
+    const unsigned int outyPos = outy * OutSize;
+
+    // __threadfence_block();
+    sharedOut[outx + outyPos + ] += sum + (bx == 0) ? bias[bx] : 0;
+    __syncthreads();
+
+    if (outx >= OutSizeHalf || outy >= OutSizeHalf || tz != 0) {
         return;
     }
 
-    const int outx2  = outx << 1;
-    const int outy2  = (outy << 1) * OutSize;
+    const int outx2 = outx << 1;
+    const int outy2 = (outy << 1) * OutSize;
     const int outx2Nex = outx2 + 1;
     const int outy2Nex = ((outy << 1) + 1) * OutSize;
 
@@ -308,18 +295,30 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
 void test_conv()
 {
     float himage[] = {1,1,1,1,
-                     1,2,1,1,
-                     1,1,1,1,
-                     1,1,1,1};
-                     
+                      1,2,1,1,
+                      1,1,1,1,
+                      1,1,1,1,
+
+                      1,1,1,1,
+                      1,2,1,1,
+                      1,1,1,1,
+                      1,1,1,1};
 
     float hweight[] = {0,0,0,
-                      0,2,0,
-                      0,0,0,
-                      
-                      0,0,0,
-                      0,2,0,
-                      0,0,0};
+                       0,2,0,
+                       0,0,0,
+
+                       0,0,0,
+                       0,2,0,
+                       0,0,0,
+
+                       0,0,0,
+                       0,2,0,
+                       0,0,0,
+
+                       0,0,0,
+                       0,2,0,
+                       0,0,0};
 
     float hbias[] = {0,1};
 
@@ -333,9 +332,9 @@ void test_conv()
     float* dmax;
 
     CUDA_SAFE_CALL(
-        cudaMalloc((void**)&dimage, 16 * sizeof(float)));
+        cudaMalloc((void**)&dimage, 32 * sizeof(float)));
     CUDA_SAFE_CALL(
-        cudaMalloc((void**)&dweight, 18 * sizeof(float)));
+        cudaMalloc((void**)&dweight, 36 * sizeof(float)));
     CUDA_SAFE_CALL(
         cudaMalloc((void**)&dbias, 2 * sizeof(float)));
     CUDA_SAFE_CALL(
@@ -344,18 +343,18 @@ void test_conv()
         cudaMalloc((void**)&dmax, 2 * sizeof(float)));
 
     dim3 cgrid(2,1,1);
-    dim3 cblock(4,4,1);
+    dim3 cblock(4,4,2);
     
     dim3 pgrid(2,1,1);
     dim3 pblock(1,1,1);
 
     CUDA_SAFE_CALL(
         cudaMemcpy(dimage, himage,
-                    16 * sizeof(float),
+                    32 * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
         cudaMemcpy(dweight, hweight,
-                    18 * sizeof(float),
+                    36 * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
         cudaMemcpy(dbias, hbias,
@@ -374,10 +373,10 @@ void test_conv()
                     2 * sizeof(float),
                     cudaMemcpyDeviceToHost));
 
-    //printf("ans: \n%f %f\n%f %f\n",4.0, 2.0, 2.0, 2.0); 
-    //printf(       "%f %f\n%f %f\n",5.0, 3.0, 3.0, 3.0); 
-    //printf("res: \n%f %f\n%f %f\n", hout[0], hout[1], hout[2], hout[3]);
-    //printf(       "%f %f\n%f %f\n", hout[4], hout[5], hout[6], hout[7]);
+    printf("ans: \n%f %f\n%f %f\n",4.0 * 2, 2.0 * 2, 2.0 * 2, 2.0 * 2); 
+    printf(       "%f %f\n%f %f\n",5.0 * 2, 3.0 * 2, 3.0 * 2, 3.0 * 2); 
+    printf("res: \n%f %f\n%f %f\n", hout[0], hout[1], hout[2], hout[3]);
+    printf(       "%f %f\n%f %f\n", hout[4], hout[5], hout[6], hout[7]);
     printf("max: \n%f\n", hmax[0]);
     printf(       "%f\n", hmax[1]);
 }
