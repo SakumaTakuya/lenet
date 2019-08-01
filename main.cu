@@ -146,7 +146,7 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
                             tx <  Diff          || 
                             ty >= InSize - Diff || 
                             ty <  Diff;
-    const unsigned int loopCount = (InChannels+1) >> Depth;
+    const unsigned int loopCount = InChannels >> Depth;
 
     unsigned int imgCh = imgTar;
     unsigned int kchan = kerTar + kerChPos;
@@ -205,6 +205,8 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
         //    outPos, sharedOut[outPos][0], sharedOut[outPos][i]);
         sharedOut[outPos][0] += sharedOut[outPos][i]; 
     }
+    
+    __syncthreads();
     
     if (outx >= OutSizeHalf || outy >= OutSizeHalf) {
         return;
@@ -563,7 +565,7 @@ void run_all()
     float* dDense2O = (float*) deviceMalloc(sizeof(float) * FC2_OUT_SIZE);
 
     dim3 conv1Grid(20, 1, 1);
-    dim3 conv1Block(28, 28, 2);
+    dim3 conv1Block(28, 28, 1);
 
     dim3 pool1Grid(20, 1, 1);
     dim3 pool1Block(12, 12, 1);
@@ -655,7 +657,8 @@ void run_all()
         maxpool<8,64,4,16><<<pool2Grid, pool2Block>>>(
             dConv2O, dPool2O);
 */
-        conv2D_pool<28,1,784,24,576,12,144,5,25,2,1><<<conv1Grid,conv1Block>>>(
+
+        conv2D_pool<28,1,784,24,576,12,144,5,25,2,0><<<conv1Grid,conv1Block>>>(
             dImage, dPool1O, dConv1W, dConv1B);
         conv2D_pool<12,20,144,8,64,4,16,5,25,2,1><<<conv2Grid, conv2Block>>>(
             dPool1O, dPool2O, dConv2W, dConv2B);
