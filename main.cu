@@ -116,35 +116,47 @@ __global__ void conv2D(float* inImg, float* outImg,
 
 template <int InSize,  int InChannels,  int InSize2, 
           int OutSize, int OutSize2, int OutSizeHalf, int OutSizeHalf2,
-          int KernelSize, int KernelSize2, int Diff >
+          int KernelSize, int KernelSize2, int Diff, int Depth >
 __global__ void conv2D_pool(float* inImg, float* outImg, 
-                       float* weight, float* bias)
+                            float* weight, float* bias)
 {
     /*
         gridDim  == (output channel size, 1, 1)
-        blockDim == (input size, input size, 1)
+        blockDim == (input size, input size, Depth)
     */
 
-    __shared__ float sharedImg[InSize2];
-    __shared__ float sharedOut[OutSize2]; 
+    __shared__ float sharedImg[InSize2][Depth + 1];
+    __shared__ float sharedOut[OutSize2][Depth + 1]; 
 
     const unsigned int tx = threadIdx.x; 
     const unsigned int ty = threadIdx.y; 
+    const unsigned int tz = threadIdx.z; 
     const unsigned int bx = blockIdx.x;
-    const unsigned int outx = tx-Diff;
-    const unsigned int outy = ty-Diff;
+    const unsigned int imgTar = (InSize2 << tz) - InSize2;
+    const unsigned int kerTar = (KernelSize2 << tz) - KernelSize2;
+
+    const unsigned int outx = tx - Diff;
+    const unsigned int outy = ty - Diff;
+
     const unsigned int pos = tx + InSize * ty; 
+    // 一つ一つのサイズはKernelSize * KernelSize * InChannels
     const unsigned int kerChPos = KernelSize2 * InChannels * bx;
     const unsigned int inSizOuty = InSize * outy;
-    const bool outOfRange = tx>OutSize+1 || tx<Diff || ty>OutSize+1 || ty<Diff;
+    const bool outOfRange = tx >= InSize - Diff ||
+                            tx <  Diff          || 
+                            ty >= InSize - Diff || 
+                            ty <  Diff;
+    const unsigned int loopCount = (InChannels+1) >> Depth;
 
-    unsigned int imgCh = 0;
-    unsigned int kchan = kerChPos;
+    unsigned int imgCh = imgTar;
+    unsigned int kchan = kerTar + kerChPos;
     float sum = 0;
     #pragma unroll
-    for (unsigned int ch = 0; ch < InChannels; ch++) {
+    for (unsigned int ch = 0; ch < loopCount; ch++) {
         __syncthreads();
-        sharedImg[pos] = inImg[pos + imgCh]; 
+        sharedImg[pos][tz] = inImg[pos + imgCh]; 
+        //printf("share[%d][%d]=%f\tinimg[%d]=%f\n", 
+        //    pos, tz, sharedImg[pos][tz], pos+imgCh, inImg[pos + imgCh]);
         __syncthreads();
 
         if (outOfRange) {
@@ -157,24 +169,43 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
         for (unsigned int i = 0; i < KernelSize; i++) {
             #pragma unroll
             for (unsigned int j = 0; j < KernelSize; j++) {
-                sum += sharedImg[outx+j + imgyPos] * weight[kPos];
+   
+                //printf("[%d,%d]%d,%d,%d,%d\tshrePos=%d kPos=%d\nw=%f\ti=%f\n",
+                //       i, j, tx, ty, tz, bx, 
+                //       outx+j + imgyPos, kPos, 
+                //       weight[kPos], sharedImg[outx+j + imgyPos][tz]);
+               
+                sum += sharedImg[outx+j + imgyPos][tz] * weight[kPos];
                 kPos++;
             }
             imgyPos += InSize;
         }
-        imgCh += InSize2;
-        kchan += KernelSize2;
+        imgCh += InSize2 << Depth;
+        kchan += KernelSize2 << Depth;
     }
 
     if (outOfRange) {
         return;
     }
-     
-    const unsigned int outyPos = outy * OutSize;
 
-    sharedOut[outx + outyPos] = sum + bias[bx];
+    const unsigned int outyPos = outy * OutSize;
+    const unsigned int outPos = outx + outyPos; 
+
+    sharedOut[outPos][tz] = sum + (tz == 0 ? bias[bx] : 0);
+    //printf("(%d,%d,%d)shared[%d][%d]=%f\n", tx,ty,bx,outPos, tz,sharedOut[outPos][tz] );
     __syncthreads();
 
+    if (tz != 0) {
+        return;
+    }
+
+    #pragma unroll
+    for (unsigned int i = 1; i <= Depth; i++){
+        //printf("add(%d):%f+%f\n", 
+        //    outPos, sharedOut[outPos][0], sharedOut[outPos][i]);
+        sharedOut[outPos][0] += sharedOut[outPos][i]; 
+    }
+    
     if (outx >= OutSizeHalf || outy >= OutSizeHalf) {
         return;
     }
@@ -186,10 +217,10 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
 
     outImg[outx + (outyPos >> 1) + bx * OutSizeHalf2] = 
         fmaxf(
-            fmaxf(sharedOut[outx2    + outy2], 
-                  sharedOut[outx2Nex + outy2]),
-            fmaxf(sharedOut[outx2    + outy2Nex], 
-                  sharedOut[outx2Nex + outy2Nex])
+            fmaxf(sharedOut[outx2    + outy2][0], 
+                  sharedOut[outx2Nex + outy2][0]),
+            fmaxf(sharedOut[outx2    + outy2Nex][0], 
+                  sharedOut[outx2Nex + outy2Nex][0])
         );
 }
 
@@ -268,7 +299,7 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
 
     __shared__ float sharedOut[InSize];
 
-#ifdef D
+#ifdef DO
     if (tx == 0) printf("input[%d]=%f\nweight[%d,%d]=%f\n", 
         tx, input[tx], tx, bx, weight[tx + InSize * bx]);
 #endif 
@@ -279,7 +310,7 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
     unsigned int j = 0;
     for (unsigned int i = InSize >> 1; i > 0; i >>= 1 ){
         if (tx < i) {
-#ifdef D
+#ifdef DO
             printf("%dsum[%d]{%f} = shared[%d]{%f}+shared[%d]{%f}\n",
                 bx, tx, sharedOut[tx] + sharedOut[tx+i],
                 tx, sharedOut[tx], tx+i, sharedOut[tx+i]);
@@ -287,7 +318,7 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
             sharedOut[tx] += sharedOut[tx + i];
 
             if (j == 1 && tx == 0) {
-#ifdef D
+#ifdef DO
                 printf("%dsum[%d]{%f} = shared[%d]{%f}+shared[%d]{%f}\n",
                     bx, tx, sharedOut[tx] + sharedOut[tx+i],
                     tx, sharedOut[tx], tx+i, sharedOut[tx+i]);
@@ -310,10 +341,23 @@ void test_conv()
     float himage[] = {1,1,1,1,
                      1,2,1,1,
                      1,1,1,1,
+                     1,1,1,1,
+                     
+                     1,1,1,1,
+                     1,2,1,1,
+                     1,1,1,1,
                      1,1,1,1};
                      
 
     float hweight[] = {0,0,0,
+                      0,2,0,
+                      0,0,0,
+                      
+                      0,0,0,
+                      0,2,0,
+                      0,0,0,
+
+                      0,0,0,
                       0,2,0,
                       0,0,0,
                       
@@ -333,9 +377,9 @@ void test_conv()
     float* dmax;
 
     CUDA_SAFE_CALL(
-        cudaMalloc((void**)&dimage, 16 * sizeof(float)));
+        cudaMalloc((void**)&dimage, 32 * sizeof(float)));
     CUDA_SAFE_CALL(
-        cudaMalloc((void**)&dweight, 18 * sizeof(float)));
+        cudaMalloc((void**)&dweight, 36 * sizeof(float)));
     CUDA_SAFE_CALL(
         cudaMalloc((void**)&dbias, 2 * sizeof(float)));
     CUDA_SAFE_CALL(
@@ -344,25 +388,25 @@ void test_conv()
         cudaMalloc((void**)&dmax, 2 * sizeof(float)));
 
     dim3 cgrid(2,1,1);
-    dim3 cblock(4,4,1);
+    dim3 cblock(4,4,2);
     
     dim3 pgrid(2,1,1);
     dim3 pblock(1,1,1);
 
     CUDA_SAFE_CALL(
         cudaMemcpy(dimage, himage,
-                    16 * sizeof(float),
+                    32 * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
         cudaMemcpy(dweight, hweight,
-                    18 * sizeof(float),
+                    36 * sizeof(float),
                     cudaMemcpyHostToDevice));
     CUDA_SAFE_CALL(
         cudaMemcpy(dbias, hbias,
                     2 * sizeof(float),
                     cudaMemcpyHostToDevice));
 
-    conv2D_pool<4,1,16,2,4,1,1,3,9,1><<<cgrid, cblock>>>(
+    conv2D_pool<4,2,16,2,4,1,1,3,9,1,1><<<cgrid, cblock>>>(
         dimage, dmax, dweight, dbias);
 
     CUDA_SAFE_CALL(
@@ -519,13 +563,13 @@ void run_all()
     float* dDense2O = (float*) deviceMalloc(sizeof(float) * FC2_OUT_SIZE);
 
     dim3 conv1Grid(20, 1, 1);
-    dim3 conv1Block(28, 28, 1);
+    dim3 conv1Block(28, 28, 2);
 
     dim3 pool1Grid(20, 1, 1);
     dim3 pool1Block(12, 12, 1);
 
     dim3 conv2Grid(50, 1, 1);
-    dim3 conv2Block(12, 12, 1);
+    dim3 conv2Block(12, 12, 2);
 
     dim3 pool2Grid(50, 1, 1);
     dim3 pool2Block(4, 4, 1);
@@ -611,9 +655,9 @@ void run_all()
         maxpool<8,64,4,16><<<pool2Grid, pool2Block>>>(
             dConv2O, dPool2O);
 */
-        conv2D_pool<28,1,784,24,576,12,144,5,25,2><<<conv1Grid,conv1Block>>>(
+        conv2D_pool<28,1,784,24,576,12,144,5,25,2,1><<<conv1Grid,conv1Block>>>(
             dImage, dPool1O, dConv1W, dConv1B);
-        conv2D_pool<12,20,144,8,64,4,16,5,25,2><<<conv2Grid, conv2Block>>>(
+        conv2D_pool<12,20,144,8,64,4,16,5,25,2,1><<<conv2Grid, conv2Block>>>(
             dPool1O, dPool2O, dConv2W, dConv2B);
 
 
