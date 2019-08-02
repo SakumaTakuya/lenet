@@ -352,6 +352,92 @@ __global__ void dense_relu(float* input, float* output, float* weight, float* bi
     }
 }
 
+
+template <int InSize, int OutSize>
+__global__ void dense_relu_half(float* input, float* output, float* weight, float* bias)
+{
+    /*
+        gridDim == (output size, 1, 1)
+        blockDim == (input size / 2, 1, 1)
+    */
+
+    const unsigned int tx = threadIdx.x;
+    const unsigned int bx = blockIdx.x;
+
+    __shared__ float sharedOut[InSize];
+    sharedOut[tx] = input[tx         ] * weight[tx          + (InSize << 1) * bx] + 
+                    input[tx + InSize] * weight[tx + InSize + (InSize << 1) * bx]; 
+
+    //printf("(%d)out[%d]=%f*%f+%f*%f\n",bx, tx ,input[tx] ,weight[tx+ (InSize << 1) * bx], 
+    //                input[tx + InSize], weight[tx + InSize + (InSize << 1) * bx]); 
+    __syncthreads();
+
+    unsigned int j = (InSize >> 1) & 1;
+    for (unsigned int i = InSize >> 1; i > 0; i >>= 1){
+        if (tx < i) {
+//            printf("(%d) out[%d]=(%d)%f+(%d)%f\n",bx,tx,tx,sharedOut[tx], tx+i,sharedOut[tx + i]);
+            sharedOut[tx] += sharedOut[tx + i];
+
+            if (j == 1 && tx == 0) {
+//                printf("(%d) out[%d]=(%d)%f+(%d)%f\n",bx,tx,tx, sharedOut[tx],i<<1, sharedOut[i << 1]);
+                sharedOut[tx] += sharedOut[i << 1];
+            }
+        }
+
+        __syncthreads();
+       j = i & 1;
+    }
+    
+    if (tx == 0){
+        output[bx] = fmaxf(0, sharedOut[0] + bias[bx]);
+    }
+}
+
+
+template <int InSize, int OutSize, int InSizeD, int InSizeT>
+__global__ void dense_relu_quarter(float* input, float* output, float* weight, float* bias)
+{
+    /*
+        gridDim == (output size, 1, 1)
+        blockDim == (input size / 2, 1, 1)
+    */
+
+    const unsigned int inWidth = InSize << 2;
+    const unsigned int tx = threadIdx.x;
+    const unsigned int bx = blockIdx.x;
+
+    __shared__ float sharedOut[InSize];
+    sharedOut[tx] = input[tx          ] * weight[tx           + inWidth * bx] + 
+                    input[tx + InSize ] * weight[tx + InSize  + inWidth * bx] + 
+                    input[tx + InSizeD] * weight[tx + InSizeD + inWidth * bx] + 
+                    input[tx + InSizeT] * weight[tx + InSizeT + inWidth * bx]; 
+
+    //printf("(%d)out[%d]=%f*%f+%f*%f\n",bx, tx ,input[tx] ,weight[tx+ (InSize << 1) * bx], 
+    //                input[tx + InSize], weight[tx + InSize + (InSize << 1) * bx]); 
+    __syncthreads();
+
+    unsigned int j = (InSize >> 1) & 1;
+    for (unsigned int i = InSize >> 1; i > 0; i >>= 1){
+        if (tx < i) {
+//            printf("(%d) out[%d]=(%d)%f+(%d)%f\n",bx,tx,tx,sharedOut[tx], tx+i,sharedOut[tx + i]);
+            sharedOut[tx] += sharedOut[tx + i];
+
+            if (j == 1 && tx == 0) {
+//                printf("(%d) out[%d]=(%d)%f+(%d)%f\n",bx,tx,tx, sharedOut[tx],i<<1, sharedOut[i << 1]);
+                sharedOut[tx] += sharedOut[i << 1];
+            }
+        }
+
+        __syncthreads();
+       j = i & 1;
+    }
+    
+    if (tx == 0){
+        output[bx] = fmaxf(0, sharedOut[0] + bias[bx]);
+    }
+}
+
+
 void test_conv()
 {
     float himage[] = {1,1,1,1,
@@ -444,9 +530,9 @@ void test_conv()
 
 void test_dense()
 {
-    float himage[] = {1,2,1,1,1,1};
-    float hweight[] = { 1,1,2,2,1,1,
-                        1,1,1,1,1,1};
+    float himage[]  = {1,2,1,1,1,1};
+    float hweight[] = {1,1,2,2,1,1,
+                       1,1,1,1,1,1};
     float hbias[] = {1, 0};
 
     float hout[2] = {0};
@@ -466,6 +552,8 @@ void test_dense()
     CUDA_SAFE_CALL(
         cudaMalloc((void**)&dout, 2 * sizeof(float)));
 
+    dim3 dblock_h(3,1,1);
+
     dim3 dgrid(2,1,1);
     dim3 dblock(6,1,1);
 
@@ -482,7 +570,7 @@ void test_dense()
                     2 * sizeof(float),
                     cudaMemcpyHostToDevice));
 
-    dense_relu<6,2><<<dgrid, dblock>>>(
+    dense_relu_half<3,2><<<dgrid, dblock_h>>>(
         dimage, dout, dweight, dbias);
     CUDA_SAFE_CALL(
         cudaMemcpy(hout, dout, 
@@ -591,7 +679,7 @@ void run_all()
     dim3 pool2Block(4, 4, 1);
 
     dim3 dense1Grid(500, 1, 1);
-    dim3 dense1Block(800, 1, 1);
+    dim3 dense1Block(200, 1, 1);
     
     dim3 dense2Grid(10, 1, 1);
     dim3 dense2Block(500, 1, 1);
@@ -607,8 +695,8 @@ void run_all()
     cudaEvent_t startEvent;
     cudaEvent_t stopEvent;
     float elapsedTime;
-    float hTime;
-    float dTime;
+    float hTime = 0.0f;
+    float dTime = 0.0f;
 
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
@@ -648,13 +736,12 @@ void run_all()
         cudaEventElapsedTime(&elapsedTime, startEvent, stopEvent);
         hTime += elapsedTime;
 
-        cudaEventRecord(startEvent, 0);
-
         /* Feed-Forward in GPU */
         CUDA_SAFE_CALL(
             cudaMemcpy(dImage, hImage, IMAGE_SIZE * sizeof(float),
             cudaMemcpyHostToDevice));
 
+        cudaEventRecord(startEvent, 0);
 /*
         conv2D<28,1,784,24,576,5,25><<<conv1Grid, conv1Block>>>(
             dImage, dConv1O, dConv1W, dConv1B);
@@ -670,8 +757,10 @@ void run_all()
             <<<conv1Grid,conv1Block>>>(dImage, dPool1O, dConv1W, dConv1B);
         conv2D_pool<12,20,144, 8, 64, 4, 16,5,25,2,4,288, 50,500,10>
             <<<conv2Grid, conv2Block>>>(dPool1O, dPool2O, dConv2W, dConv2B);
+        //conv2D_pool<12,20,144, 8, 64, 4, 16,5,25,2,4,576,100,500,5>
+        //    <<<conv2Grid, conv2Block>>>(dPool1O, dPool2O, dConv2W, dConv2B);
 
-        dense_relu<800,500><<<dense1Grid, dense1Block>>>(
+        dense_relu_quarter<200,500,400,600><<<dense1Grid, dense1Block>>>(
             dPool2O, dDense1O, dDense1W, dDense1B);
         dense_exp<500,10><<<dense2Grid, dense2Block>>>(
             dDense1O, dDense2O, dDense2W, dDense2B);
