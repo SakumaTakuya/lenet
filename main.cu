@@ -121,6 +121,254 @@ __global__ void conv2D(float* inImg, float* outImg,
     outImg[(tx-diff) + (ty-diff) * OutSize + bx * OutSize2] = sum + bias[bx];
 }
 
+
+template <int InSize,  int InChannels,  int InSize2, 
+          int OutSize, int OutSize2, int OutSizeHalf, int OutSizeHalf2,
+          int KernelSize, int KernelSize2, int Diff >
+__global__ void conv2D_pool_vanilla(float* inImg, float* outImg, 
+                       float* weight, float* bias)
+{
+    /*
+        gridDim  == (output channel size, 1, 1)
+        blockDim == (input size, input size, 1)
+    */
+
+    __shared__ float sharedImg[InSize2];
+    __shared__ float sharedOut[OutSize2]; 
+
+    const unsigned int tx = threadIdx.x; 
+    const unsigned int ty = threadIdx.y; 
+    const unsigned int bx = blockIdx.x;
+    const unsigned int outx = tx-Diff;
+    const unsigned int outy = ty-Diff;
+    const unsigned int pos = tx + InSize * ty; 
+    const unsigned int kerChPos = KernelSize2 * InChannels * bx;
+    const unsigned int inSizOuty = InSize * outy;
+    const bool outOfRange = tx>OutSize+1 || tx<Diff || ty>OutSize+1 || ty<Diff;
+
+    unsigned int imgCh = 0;
+    unsigned int kchan = kerChPos;
+    float sum = 0;
+    #pragma unroll
+    for (unsigned int ch = 0; ch < InChannels; ch++) {
+        __syncthreads();
+        sharedImg[pos] = inImg[pos + imgCh]; 
+        __syncthreads();
+
+        if (outOfRange) {
+            continue;
+        }
+
+        unsigned int kPos = kchan;
+        unsigned int imgyPos = inSizOuty;
+        #pragma unroll
+        for (unsigned int i = 0; i < KernelSize; i++) {
+            #pragma unroll
+            for (unsigned int j = 0; j < KernelSize; j++) {
+                sum += sharedImg[outx+j + imgyPos] * weight[kPos];
+                kPos++;
+            }
+            imgyPos += InSize;
+        }
+        imgCh += InSize2;
+        kchan += KernelSize2;
+    }
+
+    if (outOfRange) {
+        return;
+    }
+     
+    const unsigned int outyPos = outy * OutSize;
+
+    sharedOut[outx + outyPos] = sum + bias[bx];
+    __syncthreads();
+
+    if (outx >= OutSizeHalf || outy >= OutSizeHalf) {
+        return;
+    }
+
+    const int outx2  = outx << 1;
+    const int outy2  = (outy << 1) * OutSize;
+    const int outx2Nex = outx2 + 1;
+    const int outy2Nex = ((outy << 1) + 1) * OutSize;
+
+    outImg[outx + (outyPos >> 1) + bx * OutSizeHalf2] = 
+        fmaxf(
+            fmaxf(sharedOut[outx2    + outy2], 
+                  sharedOut[outx2Nex + outy2]),
+            fmaxf(sharedOut[outx2    + outy2Nex], 
+                  sharedOut[outx2Nex + outy2Nex])
+        );
+}
+
+
+template <int InSize,  int InChannels,  int InSize2, 
+          int OutSize, int OutSize2, int OutSizeHalf, int OutSizeHalf2,
+          int KernelSize, int KernelSize2, int Diff, int BaseSize, int BaseSize2 >
+__global__ void conv2D_pool_quad(float* inImg, float* outImg, 
+                       float* weight, float* bias)
+{
+    /*
+        gridDim  == (output channel size, 2, 2)
+        blockDim == (input size/2+2, input size/2+2, 1)
+    */
+
+    __shared__ float sharedImg[InSize2];
+    __shared__ float sharedOut[OutSize2]; 
+
+    const unsigned int tx = threadIdx.x; 
+    const unsigned int ty = threadIdx.y; 
+    const unsigned int bx = blockIdx.x;
+    const unsigned int by = blockIdx.y;
+    const unsigned int bz = blockIdx.z;
+    const unsigned int outx = tx-Diff;
+    const unsigned int outy = ty-Diff;
+    const unsigned int pos = tx + InSize * ty; 
+    const unsigned int kerChPos = KernelSize2 * InChannels * bx;
+    const unsigned int inSizOuty = InSize * outy;
+    const bool outOfRange = tx >= InSize - Diff ||
+                            tx <  Diff          || 
+                            ty >= InSize - Diff || 
+                            ty <  Diff;
+
+    unsigned int imgCh = 0;
+    unsigned int kchan = kerChPos;
+    float sum = 0;
+    #pragma unroll
+    for (unsigned int ch = 0; ch < InChannels; ch++) {
+        __syncthreads();
+        sharedImg[pos] = inImg[(tx + (InSize-Diff) * by) + (ty + (InSize-Diff) * bz) * BaseSize + imgCh]; 
+        __syncthreads();
+
+        if (outOfRange) {
+            continue;
+        }
+
+        unsigned int kPos = kchan;
+        unsigned int imgyPos = inSizOuty;
+        #pragma unroll
+        for (unsigned int i = 0; i < KernelSize; i++) {
+            #pragma unroll
+            for (unsigned int j = 0; j < KernelSize; j++) {
+                sum += sharedImg[outx+j + imgyPos] * weight[kPos];
+                kPos++;
+            }
+            imgyPos += InSize;
+        }
+        imgCh += BaseSize2;
+        kchan += KernelSize2;
+    }
+
+    if (outOfRange) {
+        return;
+    }
+     
+    const unsigned int outyPos = outy * OutSize;
+
+    sharedOut[outx + outyPos] = sum + bias[bx];
+    __syncthreads();
+
+    if (outx >= OutSizeHalf || outy >= OutSizeHalf) {
+        return;
+    }
+
+    const int outx2  = outx << 1;
+    const int outy2  = (outy << 1) * OutSize;
+    const int outx2Nex = outx2 + 1;
+    const int outy2Nex = ((outy << 1) + 1) * OutSize;
+
+    outImg[outx + (outyPos >> 1) + bx * OutSizeHalf2] = 
+        fmaxf(
+            fmaxf(sharedOut[outx2    + outy2], 
+                  sharedOut[outx2Nex + outy2]),
+            fmaxf(sharedOut[outx2    + outy2Nex], 
+                  sharedOut[outx2Nex + outy2Nex])
+        );
+}
+
+
+template <int InSize,  int InChannels,  int InSize2, 
+          int OutSize, int OutSize2, int OutSizeHalf, int OutSizeHalf2,
+          int KernelSize, int KernelSize2, int Diff, int KernelScale>
+__global__ void conv2D_pool_ch1(float* inImg, float* outImg, 
+                       float* weight, float* bias)
+{
+    /*
+        gridDim  == (output channel size, 1, 1)
+        blockDim == (input size, input size, Kernel)
+    */
+
+    __shared__ float sharedImg[InSize2];
+    __shared__ float sharedOut[OutSize2]; 
+    __shared__ float sharedWeight[KernelSize2];
+
+    const unsigned int tx = threadIdx.x; 
+    const unsigned int ty = threadIdx.y; 
+    const unsigned int bx = blockIdx.x;
+    const unsigned int outx = tx-Diff;
+    const unsigned int outy = ty-Diff;
+    const unsigned int pos = tx + InSize * ty; 
+    const unsigned int kChPos = KernelScale * bx;
+    const unsigned int inSizOuty = InSize * outy;
+    const bool outOfRange = tx >= InSize-Diff || 
+                            tx <  Diff        || 
+                            ty >= InSize-Diff || 
+                            ty <  Diff;
+
+    if(tx < KernelSize2) {
+        sharedWeight[tx] = weight[tx + kChPos];
+    }
+
+    float sum = 0;
+    __syncthreads();
+
+    sharedImg[pos] = inImg[pos]; 
+    __syncthreads();
+
+    if (outOfRange) {
+        return;
+    }
+
+    unsigned int kPos = 0;
+    unsigned int imgyPos = inSizOuty;
+    #pragma unroll
+    for (unsigned int i = 0; i < KernelSize; i++) {
+        #pragma unroll
+        for (unsigned int j = 0; j < KernelSize; j++) {
+            sum += sharedImg[outx+j + imgyPos] * sharedWeight[kPos];
+            kPos++;
+        }
+        imgyPos += InSize;
+    }
+
+    //if (outOfRange) {
+    //    return;
+    //}
+     
+    const unsigned int outyPos = outy * OutSize;
+
+    sharedOut[outx + outyPos] = sum + bias[bx];
+    __syncthreads();
+
+    if (outx >= OutSizeHalf || outy >= OutSizeHalf) {
+        return;
+    }
+
+    const int outx2  = outx << 1;
+    const int outy2  = (outy << 1) * OutSize;
+    const int outx2Nex = outx2 + 1;
+    const int outy2Nex = ((outy << 1) + 1) * OutSize;
+
+    outImg[outx + (outyPos >> 1) + bx * OutSizeHalf2] = 
+        fmaxf(
+            fmaxf(sharedOut[outx2    + outy2], 
+                  sharedOut[outx2Nex + outy2]),
+            fmaxf(sharedOut[outx2    + outy2Nex], 
+                  sharedOut[outx2Nex + outy2Nex])
+        );
+}
+
+
 /*
     Depth == BlockDim.z
     InSize2Depth == InSize2 << (Depth >> 1)
@@ -149,8 +397,8 @@ __global__ void conv2D_pool(float* inImg, float* outImg,
     const unsigned int ty = threadIdx.y; 
     const unsigned int tz = threadIdx.z; 
     const unsigned int bx = blockIdx.x;
-    const unsigned int imgTar = (InSize2 << tz) - InSize2;
-    const unsigned int kerTar = (KernelSize2 << tz) - KernelSize2;
+    const unsigned int imgTar = InSize2 * tz;
+    const unsigned int kerTar = KernelSize2 * tz;
 
     const unsigned int outx = tx - Diff;
     const unsigned int outy = ty - Diff;
@@ -438,6 +686,54 @@ __global__ void dense_relu_quarter(float* input, float* output, float* weight, f
 }
 
 
+template <int InSize, int OutSize, int InSizeD, int InSizeT, int InSizeQ, int InSizeF, int InSizeS, int InSizeSe>
+__global__ void dense_relu_eighth(float* input, float* output, float* weight, float* bias)
+{
+    /*
+        gridDim == (output size, 1, 1)
+        blockDim == (input size / 8, 1, 1)
+    */
+
+    const unsigned int inWidth = InSize << 3;
+    const unsigned int tx = threadIdx.x;
+    const unsigned int bx = blockIdx.x;
+
+    __shared__ float sharedOut[InSize];
+    sharedOut[tx] = input[tx           ] * weight[tx            + inWidth * bx] + 
+                    input[tx + InSize  ] * weight[tx + InSize   + inWidth * bx] + 
+                    input[tx + InSizeD ] * weight[tx + InSizeD  + inWidth * bx] + 
+                    input[tx + InSizeT ] * weight[tx + InSizeT  + inWidth * bx] + 
+                    input[tx + InSizeQ ] * weight[tx + InSizeQ  + inWidth * bx] + 
+                    input[tx + InSizeF ] * weight[tx + InSizeF  + inWidth * bx] + 
+                    input[tx + InSizeS ] * weight[tx + InSizeS  + inWidth * bx] + 
+                    input[tx + InSizeSe] * weight[tx + InSizeSe + inWidth * bx]; 
+
+    //printf("(%d)out[%d]=%f*%f+%f*%f\n",bx, tx ,input[tx] ,weight[tx+ (InSize << 1) * bx], 
+    //                input[tx + InSize], weight[tx + InSize + (InSize << 1) * bx]); 
+    __syncthreads();
+
+    unsigned int j = (InSize >> 1) & 1;
+    for (unsigned int i = InSize >> 1; i > 0; i >>= 1){
+        if (tx < i) {
+//            printf("(%d) out[%d]=(%d)%f+(%d)%f\n",bx,tx,tx,sharedOut[tx], tx+i,sharedOut[tx + i]);
+            sharedOut[tx] += sharedOut[tx + i];
+
+            if (j == 1 && tx == 0) {
+//                printf("(%d) out[%d]=(%d)%f+(%d)%f\n",bx,tx,tx, sharedOut[tx],i<<1, sharedOut[i << 1]);
+                sharedOut[tx] += sharedOut[i << 1];
+            }
+        }
+
+        __syncthreads();
+       j = i & 1;
+    }
+    
+    if (tx == 0){
+        output[bx] = fmaxf(0, sharedOut[0] + bias[bx]);
+    }
+}
+
+
 void test_conv()
 {
     float himage[] = {1,1,1,1,
@@ -673,7 +969,7 @@ void run_all()
     dim3 pool1Block(12, 12, 1);
 
     dim3 conv2Grid(50, 1, 1);
-    dim3 conv2Block(12, 12, 2);
+    dim3 conv2Block(12, 12, 4);
 
     dim3 pool2Grid(50, 1, 1);
     dim3 pool2Block(4, 4, 1);
@@ -753,13 +1049,15 @@ void run_all()
             dConv2O, dPool2O);
 */
 
-        conv2D_pool<28, 1,784,24,576,12,144,5,25,2,1,784, 25, 25,1>
+        conv2D_pool_ch1<28, 1,784,24,576,12,144,5,25,2,25>
             <<<conv1Grid,conv1Block>>>(dImage, dPool1O, dConv1W, dConv1B);
-        conv2D_pool<12,20,144, 8, 64, 4, 16,5,25,2,4,288, 50,500,10>
-            <<<conv2Grid, conv2Block>>>(dPool1O, dPool2O, dConv2W, dConv2B);
-        //conv2D_pool<12,20,144, 8, 64, 4, 16,5,25,2,4,576,100,500,5>
+        //conv2D_pool<12,20,144, 8, 64, 4, 16,5,25,2,4,288, 50,500,10>
         //    <<<conv2Grid, conv2Block>>>(dPool1O, dPool2O, dConv2W, dConv2B);
+        conv2D_pool<12,20,144, 8, 64, 4, 16,5,25,2,4,576,100,500,5>
+            <<<conv2Grid, conv2Block>>>(dPool1O, dPool2O, dConv2W, dConv2B);
 
+        //dense_relu_eighth<100,500,200,300,400,500,600,700><<<dense1Grid, dense1Block>>>(
+        //    dPool2O, dDense1O, dDense1W, dDense1B);
         dense_relu_quarter<200,500,400,600><<<dense1Grid, dense1Block>>>(
             dPool2O, dDense1O, dDense1W, dDense1B);
         dense_exp<500,10><<<dense2Grid, dense2Block>>>(
@@ -839,14 +1137,29 @@ void run_all()
             cudaMemcpy(gDense2O, dDense2O,
                         FC2_OUT_SIZE * sizeof(float),
                         cudaMemcpyDeviceToHost));
-
+        
         float sum = 0;
-        for (int m = 0; m < FC2_OUT_SIZE; m++) {
-            sum += gDense2O[m];
-        }
-        for(int m = 0; m < FC2_OUT_SIZE; m++) {
-            gDense2O[m] /= sum;
-        }
+        sum += gDense2O[0];
+        sum += gDense2O[1];
+        sum += gDense2O[2];
+        sum += gDense2O[3];
+        sum += gDense2O[4];
+        sum += gDense2O[5];
+        sum += gDense2O[6];
+        sum += gDense2O[7];
+        sum += gDense2O[8];
+        sum += gDense2O[9];
+        
+        gDense2O[0] /= sum;
+        gDense2O[1] /= sum;
+        gDense2O[2] /= sum;
+        gDense2O[3] /= sum;
+        gDense2O[4] /= sum;
+        gDense2O[5] /= sum;
+        gDense2O[6] /= sum;
+        gDense2O[7] /= sum;
+        gDense2O[8] /= sum;
+        gDense2O[9] /= sum;
 
         cudaEventRecord(stopEvent, 0);
         cudaEventSynchronize(stopEvent);
